@@ -1,0 +1,55 @@
+{
+  "kills": {
+    "lorencia_1": {
+      "killTime": 1777978560000,
+      "respawnTime": 1778003760000,
+      "lastKiller": "mr.cristian7"
+    },
+    "lorencia_2": {
+      "killTime": 1777995112522,
+      "respawnTime": 1778020312522,
+      "lastKiller": "brok3nwr1st"
+    },
+    "lorencia_3": {
+      "killTime": 1777956180000,
+      "respawnTime": 1777981380000,
+      "lastKiller": "mr.cristian7"
+    },
+    "barracks_1": {
+      "killTime": 1777959540000,
+      "respawnTime": 1777984740000,
+      "lastKiller": "mr.cristian7"
+    },
+    "davias_3": {
+      "killTime": 1777992764789,
+      "respawnTime": 1778017964789,
+      "lastKiller": "brok3nwr1st"
+    },
+    "davias_1": {
+      "killTime": 1777977424802,
+      "respawnTime": 1778002624802,
+      "lastKiller": "mr.cristian7"
+    },
+    "davias_2": {
+      "killTime": 1777983463781,
+      "respawnTime": 1778008663781,
+      "lastKiller": "mr.cristian7"
+    },
+    "crywolf_1": {
+      "killTime": 1777988542543,
+      "respawnTime": 1778013742543,
+      "lastKiller": "mr.cristian7"
+    },
+    "barracks_2": {
+      "killTime": 1777928400000,
+      "respawnTime": 1777953600000,
+      "lastKiller": "mr.cristian7"
+    },
+    "crywolf_2": {
+      "killTime": 1777928400000,
+      "respawnTime": 1777953600000,
+      "lastKiller": "mr.cristian7"
+    }
+  },
+  "goblins": {}
+}
