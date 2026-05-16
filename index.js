@@ -82,6 +82,7 @@ const GOBLIN_QTY = {
 const SA_RESPAWN_H = {
   goblin:     10,
   sa_fixed6:   6,
+  sa_fixed7:   7,
   sa_fixed12: 12,
 };
 const SA_GOBLIN_WINDOW_MS = 1 * 60 * 60 * 1000;
@@ -95,6 +96,9 @@ function buildShadowBosses() {
     { key: "yellow_goblin", label: "Yellow Goblin",  type: "goblin"     },
     { key: "red_dragon",    label: "Red Dragon",     type: "sa_fixed6"  },
     { key: "cursed_santa",  label: "Cursed Santa",   type: "sa_fixed6"  },
+    { key: "kharzul",       label: "Kharzul",        type: "sa_fixed7"  },
+    { key: "vescrya",       label: "Vescrya",        type: "sa_fixed7"  },
+    { key: "muggron",       label: "Muggron",        type: "sa_fixed7"  },
     { key: "white_wizard",  label: "White Wizard",   type: "sa_fixed12" },
     { key: "death_king",    label: "Death King",     type: "sa_fixed12" },
   ];
@@ -951,7 +955,6 @@ async function repinDashboard(channel) {
           components: [isWorld ? buildWBSpawnWindowComponents(id)                            : buildSASpawnWindowComponents(id)][0],
           flags: MessageFlags.SuppressNotifications
         }).catch(() => null);
-        // fix: components must be array
         if (w.msg) {} // already sent above
       } else { delete spawnWindowMessages[id]; }
     }
@@ -1884,6 +1887,9 @@ client.on(Events.InteractionCreate, async interaction => {
         { label: "👺 Yellow Goblin",      value: "sa_yellow_goblin" },
         { label: "👹 Red Dragon",         value: "sa_red_dragon"    },
         { label: "👹 Cursed Santa",       value: "sa_cursed_santa"  },
+        { label: "👹 Kharzul",            value: "sa_kharzul"       },
+        { label: "👹 Vescrya",            value: "sa_vescrya"       },
+        { label: "👹 Muggron",            value: "sa_muggron"       },
         { label: "👹 White Wizard",       value: "sa_white_wizard"  },
         { label: "👹 Death King",         value: "sa_death_king"    },
         { label: "🌍 Borgar",             value: "wb_borgar"        },
