@@ -518,6 +518,9 @@ function startBackupLoop() {
 
 // =====================
 // PERSISTENT LOG MESSAGE
+// CHANGE: now lives in the MAIN channel (CHANNEL_ID) as part of the dashboard
+// stack, matching bot 2 behavior. repinDashboard re-posts it at the bottom
+// so it always stays visible below the dashboard and window cards.
 // =====================
 function buildLogEmbed() {
   const recent      = adminLogs.slice(0, 20);
@@ -531,6 +534,7 @@ function buildLogEmbed() {
     .setFooter({ text: "Auto-updates on every action" });
 }
 
+// CHANGE: channel param is now the MAIN channel, not the log channel.
 async function initLogMessage(channel) {
   logMessage = await channel.send({ embeds: [buildLogEmbed()], flags: MessageFlags.SuppressNotifications });
   console.log("[Log] Log message posted.");
@@ -539,7 +543,11 @@ async function initLogMessage(channel) {
 async function updateLogMessage() {
   if (!logMessage) return;
   try { await logMessage.edit({ embeds: [buildLogEmbed()] }); }
-  catch (err) { console.error("[Log] Update failed:", err.message ?? err); }
+  catch (err) {
+    // If the message was deleted (e.g. during a repin), just let repinDashboard
+    // handle re-creating it — don't spam errors.
+    if (err.code !== 10008) console.error("[Log] Update failed:", err.message ?? err);
+  }
 }
 
 // =====================
@@ -932,6 +940,10 @@ function buildShadowButtons() {
 
 // =====================
 // REPIN DASHBOARD
+// CHANGE: after re-posting the dashboard and all window cards, the log message
+// is also deleted and re-posted at the very bottom of the stack so it always
+// stays visible — matching bot 2's behavior of keeping the log embed at the
+// bottom of the main channel alongside the dashboard.
 // =====================
 async function repinDashboard(channel) {
   if (repinInProgress) { console.log("[Repin] Already in progress, skipping."); return; }
@@ -952,10 +964,9 @@ async function repinDashboard(channel) {
         const isWorld = !!WORLD_BOSSES.find(b => b.id === id);
         w.msg = await channel.send({
           embeds:     [isWorld ? buildWBSpawnWindowEmbed(w.boss, w.windowStart, w.windowEnd) : buildSASpawnWindowEmbed(w.boss, w.windowStart, w.windowEnd)],
-          components: [isWorld ? buildWBSpawnWindowComponents(id)                            : buildSASpawnWindowComponents(id)][0],
+          components: isWorld ? buildWBSpawnWindowComponents(id) : buildSASpawnWindowComponents(id),
           flags: MessageFlags.SuppressNotifications
         }).catch(() => null);
-        if (w.msg) {} // already sent above
       } else { delete spawnWindowMessages[id]; }
     }
 
@@ -976,6 +987,14 @@ async function repinDashboard(channel) {
         flags: MessageFlags.SuppressNotifications
       }).catch(() => null);
     }
+
+    // CHANGE: re-post the log embed at the very bottom so it stays visible
+    // below the dashboard and all window cards, same as bot 2's channel stack.
+    if (logMessage) logMessage.delete().catch(() => {});
+    logMessage = await channel.send({
+      embeds: [buildLogEmbed()],
+      flags:  MessageFlags.SuppressNotifications
+    }).catch(err => { console.error("[Repin] Failed to re-post log message:", err.message ?? err); return null; });
 
     console.log("[Repin] Dashboard stack refreshed.");
   } finally { repinInProgress = false; }
@@ -1157,8 +1176,14 @@ function startLoop() {
       try {
         await dashboardMessage.edit({ embeds: [buildShadowEmbed()], components: buildShadowButtons() });
       } catch (err) {
-        if (err.code === 10008) { console.warn("[Loop] Dashboard deleted — repinning."); dashboardMessage = null; }
-        else if (err.status !== 503 && err.status !== 502) {
+        if (err.code === 10008) {
+          // CHANGE: dashboard was deleted — repin the whole stack (dashboard +
+          // windows + log) so it returns to the bottom of the channel, matching
+          // bot 2 behavior.
+          console.warn("[Loop] Dashboard deleted — repinning full stack.");
+          dashboardMessage = null;
+          if (!repinInProgress) repinDashboard(channel);
+        } else if (err.status !== 503 && err.status !== 502) {
           console.error("[Loop] Dashboard edit failed:", err.code, err.message);
           if (err.code !== 50013) dashboardMessage = null;
         }
@@ -1385,19 +1410,37 @@ function clearWBBossCards(id, resetMissed = true) {
 
 // =====================
 // READY
+// CHANGE: initLogMessage now receives the MAIN channel so the log embed
+// appears in the same channel as the dashboard (matching bot 2).
+// The backup message still goes to LOG_CHANNEL_ID as before.
 // =====================
 client.once(Events.ClientReady, async () => {
   console.log("Shadow Abyss Bot online");
   load();
   if (await recoverFromDiscordBackup()) console.log("[Recovery] Timers restored.");
   restoreSpawnWarningFlags();
+
+  // CHANGE: fetch main channel first, pass it to initLogMessage
   const channel = await client.channels.fetch(CHANNEL_ID);
-  await initLogMessage(await client.channels.fetch(LOG_CHANNEL_ID));
+
+  // CHANGE: log message → main channel (was LOG_CHANNEL_ID)
+  await initLogMessage(channel);
+
   try { await initBackupMessage(await client.channels.fetch(LOG_CHANNEL_ID)); }
   catch (err) { console.error("[Backup] Could not init:", err.message ?? err); }
+
   dashboardMessage = await channel.send({
     embeds: [buildShadowEmbed()], components: buildShadowButtons(), flags: MessageFlags.SuppressNotifications
   });
+
+  // CHANGE: re-post log message BELOW the dashboard on startup so the stack
+  // order is: [dashboard] … [window cards] … [log embed]
+  if (logMessage) logMessage.delete().catch(() => {});
+  logMessage = await channel.send({
+    embeds: [buildLogEmbed()],
+    flags:  MessageFlags.SuppressNotifications
+  }).catch(err => { console.error("[Ready] Failed to re-post log message:", err.message ?? err); return null; });
+
   startLoop();
   startBackupLoop();
   setTimeout(() => runBackup().catch(err => console.error("[Backup] Startup failed:", err.message ?? err)), 5000);
