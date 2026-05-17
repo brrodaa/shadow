@@ -98,7 +98,7 @@ function buildShadowBosses() {
     { key: "cursed_santa",  label: "Cursed Santa",   type: "sa_fixed6"  },
     { key: "kharzul",       label: "Kharzul",        type: "sa_fixed7"  },
     { key: "vescrya",       label: "Vescrya",        type: "sa_fixed7"  },
-    { key: "muggron",       label: "Muggron",        type: "sa_fixed7"  },
+    { key: "muggron",       label: "Muggron",        type: "sa_fixed7", qty: 2 },
     { key: "white_wizard",  label: "White Wizard",   type: "sa_fixed12" },
     { key: "death_king",    label: "Death King",     type: "sa_fixed12" },
   ];
@@ -115,6 +115,21 @@ function buildShadowBosses() {
             server: s,
             index:  i,
             type:   def.type,
+            qty:    qty,
+          });
+        }
+      } else if (def.qty && def.qty > 1) {
+        // Multi-instance fixed boss (e.g. Muggron x2)
+        for (let i = 1; i <= def.qty; i++) {
+          list.push({
+            id:     `sa_${def.key}_s${s}_${i}`,
+            name:   `${def.label} S${s} #${i}`,
+            label:  def.label,
+            key:    def.key,
+            server: s,
+            index:  i,
+            type:   def.type,
+            qty:    def.qty,
           });
         }
       } else {
@@ -126,6 +141,7 @@ function buildShadowBosses() {
           server: s,
           index:  null,
           type:   def.type,
+          qty:    1,
         });
       }
     }
@@ -142,8 +158,8 @@ const HOUR = 60 * 60 * 1000;
 
 const WORLD_BOSS_CONFIG = {
   borgar:    { respawnMs: 2 * HOUR, windowMs: HOUR, missedWindowMs: HOUR, maxMissed: 2 },
-  dreadhorn: { respawnMs: 1 * HOUR, windowMs: HOUR, missedWindowMs: HOUR, maxMissed: 2 },
-  moltragon: { respawnMs: 1 * HOUR, windowMs: HOUR, missedWindowMs: HOUR, maxMissed: 2 },
+  dreadhorn: { respawnMs: 1 * HOUR, windowMs: HOUR, missedWindowMs: HOUR, maxMissed: 2, qty: 2 },
+  moltragon: { respawnMs: 1 * HOUR, windowMs: HOUR, missedWindowMs: HOUR, maxMissed: 2, qty: 2 },
 };
 
 function buildWorldBosses() {
@@ -154,15 +170,34 @@ function buildWorldBosses() {
     { key: "moltragon", label: "Moltragon" },
   ];
   for (const def of defs) {
+    const cfg = WORLD_BOSS_CONFIG[def.key];
+    const qty = cfg.qty || 1;
     for (const s of SA_SERVERS) {
-      list.push({
-        id:     `wb_${def.key}_s${s}`,
-        name:   `${def.label} S${s}`,
-        label:  def.label,
-        key:    def.key,
-        server: s,
-        type:   def.key,
-      });
+      if (qty > 1) {
+        for (let i = 1; i <= qty; i++) {
+          list.push({
+            id:     `wb_${def.key}_s${s}_${i}`,
+            name:   `${def.label} S${s} #${i}`,
+            label:  def.label,
+            key:    def.key,
+            server: s,
+            index:  i,
+            type:   def.key,
+            qty,
+          });
+        }
+      } else {
+        list.push({
+          id:     `wb_${def.key}_s${s}`,
+          name:   `${def.label} S${s}`,
+          label:  def.label,
+          key:    def.key,
+          server: s,
+          index:  null,
+          type:   def.key,
+          qty:    1,
+        });
+      }
     }
   }
   return list;
@@ -173,6 +208,70 @@ const WORLD_BOSSES = buildWorldBosses();
 function getWorldBossConfig(id) {
   const boss = WORLD_BOSSES.find(b => b.id === id);
   return WORLD_BOSS_CONFIG[boss?.type] || WORLD_BOSS_CONFIG.borgar;
+}
+
+// =====================
+// MULTI-INSTANCE WB HELPERS (Dreadhorn / Moltragon)
+// =====================
+function getWBInstances(key, server) {
+  return WORLD_BOSSES.filter(b => b.key === key && b.server === server);
+}
+
+function isMultiInstanceWB(key) {
+  return (WORLD_BOSS_CONFIG[key]?.qty || 1) > 1;
+}
+
+/** Pick the next available slot for a multi-instance WB kill.
+ *  Returns null if all slots are occupied (caller must ask user to pick). */
+function pickNextWBInstance(key, server) {
+  const instances = getWBInstances(key, server);
+  if (instances.length <= 1) return instances[0] ?? null;
+  const now = Date.now();
+  // First: any slot with no timer at all
+  const empty = instances.find(b => !data.kills[b.id]);
+  if (empty) return empty;
+  // Second: slot whose respawn window is still active
+  const inWindow = instances.find(b => {
+    const e = data.kills[b.id];
+    if (!e) return false;
+    const config    = getWorldBossConfig(b.id);
+    const windowEnd = e.respawnTime + config.windowMs;
+    return e.respawnTime <= now && windowEnd > now;
+  });
+  if (inWindow) return inWindow;
+  // All slots occupied — caller should prompt user
+  return null;
+}
+
+// =====================
+// MULTI-INSTANCE SA HELPERS (Muggron)
+// =====================
+function getSAFixedInstances(key, server) {
+  return SHADOW_BOSSES.filter(b => b.key === key && b.server === server);
+}
+
+function isMultiInstanceSAFixed(key) {
+  const sample = SHADOW_BOSSES.find(b => b.key === key);
+  return sample && sample.qty > 1 && sample.type !== "goblin";
+}
+
+/** Pick next available slot for a multi-instance SA fixed boss.
+ *  Returns null if all slots are occupied (caller must ask user to pick). */
+function pickNextSAFixedInstance(key, server) {
+  const instances = getSAFixedInstances(key, server);
+  if (instances.length <= 1) return instances[0] ?? null;
+  const now = Date.now();
+  const empty = instances.find(b => !data.kills[b.id]);
+  if (empty) return empty;
+  // Slot whose timer expired (past respawn time, within 5-min grace)
+  const spawned = instances.find(b => {
+    const e = data.kills[b.id];
+    if (!e) return false;
+    const cooldown = e.respawnTime - now;
+    return cooldown <= 0 && cooldown >= -5 * 60 * 1000;
+  });
+  if (spawned) return spawned;
+  return null; // all slots taken — ask user
 }
 
 // =====================
@@ -518,9 +617,6 @@ function startBackupLoop() {
 
 // =====================
 // PERSISTENT LOG MESSAGE
-// CHANGE: now lives in the MAIN channel (CHANNEL_ID) as part of the dashboard
-// stack, matching bot 2 behavior. repinDashboard re-posts it at the bottom
-// so it always stays visible below the dashboard and window cards.
 // =====================
 function buildLogEmbed() {
   const recent      = adminLogs.slice(0, 20);
@@ -534,7 +630,6 @@ function buildLogEmbed() {
     .setFooter({ text: "Auto-updates on every action" });
 }
 
-// CHANGE: channel param is now the MAIN channel, not the log channel.
 async function initLogMessage(channel) {
   logMessage = await channel.send({ embeds: [buildLogEmbed()], flags: MessageFlags.SuppressNotifications });
   console.log("[Log] Log message posted.");
@@ -544,8 +639,6 @@ async function updateLogMessage() {
   if (!logMessage) return;
   try { await logMessage.edit({ embeds: [buildLogEmbed()] }); }
   catch (err) {
-    // If the message was deleted (e.g. during a repin), just let repinDashboard
-    // handle re-creating it — don't spam errors.
     if (err.code !== 10008) console.error("[Log] Update failed:", err.message ?? err);
   }
 }
@@ -787,8 +880,8 @@ function buildShadowEmbed() {
     .setColor(0x7b00ff)
     .setFooter({ text: "Auto-updates every 15s" });
 
-  const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
-  const fixedKeys  = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
+  const goblinKeys    = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
+  const fixedKeys     = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
 
   // ── Goblin section ──
   embed.addFields({ name: "👺 ─── Goblins ───", value: "\u200B" });
@@ -826,51 +919,101 @@ function buildShadowEmbed() {
     const bossesForKey = SHADOW_BOSSES.filter(b => b.key === key);
     const first        = bossesForKey[0];
     const respawnH     = SA_RESPAWN_H[first.type];
-    const headerLabel  = `${first.label} — ${respawnH}h respawn`;
-    const lines = bossesForKey.map(b => {
-      const e        = data.kills[b.id];
-      const advCount = missedCount[b.id] || 0;
-      if (!e) return `**S${b.server}**: 🟢 READY`;
-      const cooldown  = e.respawnTime - now;
-      const tsRespawn = Math.floor(e.respawnTime / 1000);
-      if (cooldown > 0) {
-        const isMissed = !!missedWindowMessages[b.id];
-        if (isMissed) return `**S${b.server}**: ⚠️ ${format(cooldown)} (${advCount} missed) — <t:${tsRespawn}:t>`;
-        return `**S${b.server}**: 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
+    const isMulti      = isMultiInstanceSAFixed(key);
+    const headerLabel  = `${first.label} — ${respawnH}h respawn${isMulti ? ` (x${first.qty})` : ""}`;
+
+    if (isMulti) {
+      // Group by server, show each instance
+      for (const s of SA_SERVERS) {
+        const instances = getSAFixedInstances(key, s);
+        const parts = instances.map(b => {
+          const e        = data.kills[b.id];
+          const advCount = missedCount[b.id] || 0;
+          if (!e) return `#${b.index} 🟢 READY`;
+          const cooldown  = e.respawnTime - now;
+          const tsRespawn = Math.floor(e.respawnTime / 1000);
+          if (cooldown > 0) {
+            const isMissed = !!missedWindowMessages[b.id];
+            if (isMissed) return `#${b.index} ⚠️ ${format(cooldown)} (${advCount}m) — <t:${tsRespawn}:t>`;
+            return `#${b.index} 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
+          }
+          if (cooldown >= -5 * 60 * 1000) return `#${b.index} 🟡 SPAWNED — log kill!`;
+          return `#${b.index} ⚠️ MISSED(${advCount})`;
+        });
+        embed.addFields({ name: `• ${headerLabel} S${s}`, value: parts.join(" | ") });
       }
-      if (cooldown >= -5 * 60 * 1000) return `**S${b.server}**: 🟡 SPAWNED — <t:${tsRespawn}:t> — log kill!`;
-      return `**S${b.server}**: ⚠️ MISSED (${advCount}x) — was <t:${tsRespawn}:t>`;
-    });
-    embed.addFields({ name: `• ${headerLabel}`, value: lines.join("\n") });
+    } else {
+      const lines = bossesForKey.map(b => {
+        const e        = data.kills[b.id];
+        const advCount = missedCount[b.id] || 0;
+        if (!e) return `**S${b.server}**: 🟢 READY`;
+        const cooldown  = e.respawnTime - now;
+        const tsRespawn = Math.floor(e.respawnTime / 1000);
+        if (cooldown > 0) {
+          const isMissed = !!missedWindowMessages[b.id];
+          if (isMissed) return `**S${b.server}**: ⚠️ ${format(cooldown)} (${advCount} missed) — <t:${tsRespawn}:t>`;
+          return `**S${b.server}**: 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
+        }
+        if (cooldown >= -5 * 60 * 1000) return `**S${b.server}**: 🟡 SPAWNED — <t:${tsRespawn}:t> — log kill!`;
+        return `**S${b.server}**: ⚠️ MISSED (${advCount}x) — was <t:${tsRespawn}:t>`;
+      });
+      embed.addFields({ name: `• ${headerLabel}`, value: lines.join("\n") });
+    }
   }
 
   // ── Borgar / Dreadhorn / Moltragon section ──
   embed.addFields({ name: "🌍 ─── Borgar / Dreadhorn / Moltragon ───", value: "\u200B" });
   const wbKeys = [...new Set(WORLD_BOSSES.map(b => b.key))];
   for (const key of wbKeys) {
-    const bossesForKey = WORLD_BOSSES.filter(b => b.key === key);
-    const first        = bossesForKey[0];
-    const cfg          = WORLD_BOSS_CONFIG[key];
-    const respawnH     = cfg.respawnMs / HOUR;
-    const headerLabel  = `${first.label} — ${respawnH}h respawn`;
-    const lines = bossesForKey.map(b => {
-      const e          = data.kills[b.id];
-      const advCount   = missedCount[b.id] || 0;
-      const isMissed   = !!missedWindowMessages[b.id];
-      if (!e) return `**S${b.server}**: 🟢 READY`;
-      const cooldown   = e.respawnTime - now;
-      const windowEnd  = e.respawnTime + cfg.windowMs;
-      const windowLeft = windowEnd - now;
-      const tsRespawn  = Math.floor(e.respawnTime / 1000);
-      if (cooldown > 0) {
-        if (isMissed) return `**S${b.server}**: ⚠️ ${format(cooldown)} (${advCount} missed) — <t:${tsRespawn}:t>`;
-        return `**S${b.server}**: 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
+    const cfg      = WORLD_BOSS_CONFIG[key];
+    const respawnH = cfg.respawnMs / HOUR;
+    const isMulti  = isMultiInstanceWB(key);
+    const firstName = WORLD_BOSSES.find(b => b.key === key).label;
+
+    if (isMulti) {
+      // Show each server group separately with all instances
+      for (const s of SA_SERVERS) {
+        const instances = getWBInstances(key, s);
+        const parts = instances.map(b => {
+          const e          = data.kills[b.id];
+          const advCount   = missedCount[b.id] || 0;
+          const isMissed   = !!missedWindowMessages[b.id];
+          if (!e) return `#${b.index} 🟢 READY`;
+          const cooldown   = e.respawnTime - now;
+          const windowEnd  = e.respawnTime + cfg.windowMs;
+          const windowLeft = windowEnd - now;
+          const tsRespawn  = Math.floor(e.respawnTime / 1000);
+          if (cooldown > 0) {
+            if (isMissed) return `#${b.index} ⚠️ ${format(cooldown)} (${advCount}m) — <t:${tsRespawn}:t>`;
+            return `#${b.index} 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
+          }
+          if (windowLeft > 0) return `#${b.index} 🟢 WIN ${format(windowLeft)}`;
+          if (advCount >= cfg.maxMissed) return `#${b.index} 🚨 Wrong(${advCount}x)`;
+          return `#${b.index} ⚠️ MISSED(${advCount}x)`;
+        });
+        embed.addFields({ name: `• ${firstName} S${s} (x${cfg.qty}) — ${respawnH}h`, value: parts.join(" | ") });
       }
-      if (windowLeft > 0) return `**S${b.server}**: 🟢 WINDOW ${format(windowLeft)} — <t:${tsRespawn}:t>`;
-      if (advCount >= cfg.maxMissed) return `**S${b.server}**: 🚨 Wrong (${advCount}x missed) — update manually!`;
-      return `**S${b.server}**: ⚠️ MISSED (${advCount}x) — was <t:${tsRespawn}:t>`;
-    });
-    embed.addFields({ name: `• ${headerLabel}`, value: lines.join("\n") });
+    } else {
+      const bossesForKey = WORLD_BOSSES.filter(b => b.key === key);
+      const lines = bossesForKey.map(b => {
+        const e          = data.kills[b.id];
+        const advCount   = missedCount[b.id] || 0;
+        const isMissed   = !!missedWindowMessages[b.id];
+        if (!e) return `**S${b.server}**: 🟢 READY`;
+        const cooldown   = e.respawnTime - now;
+        const windowEnd  = e.respawnTime + cfg.windowMs;
+        const windowLeft = windowEnd - now;
+        const tsRespawn  = Math.floor(e.respawnTime / 1000);
+        if (cooldown > 0) {
+          if (isMissed) return `**S${b.server}**: ⚠️ ${format(cooldown)} (${advCount} missed) — <t:${tsRespawn}:t>`;
+          return `**S${b.server}**: 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
+        }
+        if (windowLeft > 0) return `**S${b.server}**: 🟢 WINDOW ${format(windowLeft)} — <t:${tsRespawn}:t>`;
+        if (advCount >= cfg.maxMissed) return `**S${b.server}**: 🚨 Wrong (${advCount}x missed) — update manually!`;
+        return `**S${b.server}**: ⚠️ MISSED (${advCount}x) — was <t:${tsRespawn}:t>`;
+      });
+      embed.addFields({ name: `• ${firstName} — ${respawnH}h respawn`, value: lines.join("\n") });
+    }
   }
 
   return embed;
@@ -940,10 +1083,6 @@ function buildShadowButtons() {
 
 // =====================
 // REPIN DASHBOARD
-// CHANGE: after re-posting the dashboard and all window cards, the log message
-// is also deleted and re-posted at the very bottom of the stack so it always
-// stays visible — matching bot 2's behavior of keeping the log embed at the
-// bottom of the main channel alongside the dashboard.
 // =====================
 async function repinDashboard(channel) {
   if (repinInProgress) { console.log("[Repin] Already in progress, skipping."); return; }
@@ -988,8 +1127,6 @@ async function repinDashboard(channel) {
       }).catch(() => null);
     }
 
-    // CHANGE: re-post the log embed at the very bottom so it stays visible
-    // below the dashboard and all window cards, same as bot 2's channel stack.
     if (logMessage) logMessage.delete().catch(() => {});
     logMessage = await channel.send({
       embeds: [buildLogEmbed()],
@@ -1177,9 +1314,6 @@ function startLoop() {
         await dashboardMessage.edit({ embeds: [buildShadowEmbed()], components: buildShadowButtons() });
       } catch (err) {
         if (err.code === 10008) {
-          // CHANGE: dashboard was deleted — repin the whole stack (dashboard +
-          // windows + log) so it returns to the bottom of the channel, matching
-          // bot 2 behavior.
           console.warn("[Loop] Dashboard deleted — repinning full stack.");
           dashboardMessage = null;
           if (!repinInProgress) repinDashboard(channel);
@@ -1410,9 +1544,6 @@ function clearWBBossCards(id, resetMissed = true) {
 
 // =====================
 // READY
-// CHANGE: initLogMessage now receives the MAIN channel so the log embed
-// appears in the same channel as the dashboard (matching bot 2).
-// The backup message still goes to LOG_CHANNEL_ID as before.
 // =====================
 client.once(Events.ClientReady, async () => {
   console.log("Shadow Abyss Bot online");
@@ -1420,10 +1551,8 @@ client.once(Events.ClientReady, async () => {
   if (await recoverFromDiscordBackup()) console.log("[Recovery] Timers restored.");
   restoreSpawnWarningFlags();
 
-  // CHANGE: fetch main channel first, pass it to initLogMessage
   const channel = await client.channels.fetch(CHANNEL_ID);
 
-  // CHANGE: log message → main channel (was LOG_CHANNEL_ID)
   await initLogMessage(channel);
 
   try { await initBackupMessage(await client.channels.fetch(LOG_CHANNEL_ID)); }
@@ -1433,8 +1562,6 @@ client.once(Events.ClientReady, async () => {
     embeds: [buildShadowEmbed()], components: buildShadowButtons(), flags: MessageFlags.SuppressNotifications
   });
 
-  // CHANGE: re-post log message BELOW the dashboard on startup so the stack
-  // order is: [dashboard] … [window cards] … [log embed]
   if (logMessage) logMessage.delete().catch(() => {});
   logMessage = await channel.send({
     embeds: [buildLogEmbed()],
@@ -1482,18 +1609,72 @@ client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("sa_server_select_")) {
     const key    = interaction.customId.replace("sa_server_select_", "");
     const server = parseInt(interaction.values[0], 10);
-    const isGoblinType = SHADOW_BOSSES.find(b => b.key === key)?.type === "goblin";
-    let boss;
+    const isGoblinType     = SHADOW_BOSSES.find(b => b.key === key)?.type === "goblin";
+    const isMultiSAFixed   = isMultiInstanceSAFixed(key);
+
     if (isGoblinType) {
-      boss = pickNextGoblin(key, server);
+      const boss = pickNextGoblin(key, server);
       if (!boss) {
         return interaction.reply({ content: `❌ No goblin found for ${key} S${server}.`, flags: MessageFlags.Ephemeral });
       }
-    } else {
-      const id = `sa_${key}_s${server}`;
-      boss = SHADOW_BOSSES.find(b => b.id === id);
+      log(interaction.user, `SA: Selected server ${server} for ${boss.name} (auto-picked goblin)`);
+      const modal = new ModalBuilder()
+        .setCustomId(`sa_killtime_${boss.id}`)
+        .setTitle(`Kill Time — ${boss.name}`);
+      modal.addComponents(new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("time")
+          .setLabel("HH:MM (24h, server time) or 'now'")
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder("e.g. 21:34 or now")
+      ));
+      return interaction.showModal(modal);
     }
-    log(interaction.user, `SA: Selected server ${server} for ${boss.name} (auto-picked: ${isGoblinType})`);
+
+    if (isMultiSAFixed) {
+      // Try auto-pick a free slot
+      const boss = pickNextSAFixedInstance(key, server);
+      if (boss) {
+        log(interaction.user, `SA: Auto-picked ${boss.name} for kill`);
+        const modal = new ModalBuilder()
+          .setCustomId(`sa_killtime_${boss.id}`)
+          .setTitle(`Kill Time — ${boss.name}`);
+        modal.addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("time")
+            .setLabel("HH:MM (24h, server time) or 'now'")
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder("e.g. 21:34 or now")
+        ));
+        return interaction.showModal(modal);
+      } else {
+        // All slots taken — ask user to pick which one to overwrite
+        const instances = getSAFixedInstances(key, server);
+        const now = Date.now();
+        const menu = new StringSelectMenuBuilder()
+          .setCustomId(`sa_pick_instance_${key}_s${server}`)
+          .setPlaceholder("All slots busy — pick which to update")
+          .addOptions(instances.map(b => {
+            const e = data.kills[b.id];
+            let status = "🟢 READY";
+            if (e) {
+              const cd = e.respawnTime - now;
+              status = cd > 0 ? `🔴 ${format(cd)}` : `🟡 SPAWNED`;
+            }
+            return { label: `#${b.index} — ${status}`, value: b.id };
+          }));
+        return interaction.reply({
+          content: `⚠️ **${SHADOW_BOSSES.find(b => b.key === key).label} S${server}** — All slots are active. Pick which instance to update:`,
+          components: [new ActionRowBuilder().addComponents(menu)],
+          flags: MessageFlags.Ephemeral
+        });
+      }
+    }
+
+    // Single-instance SA fixed
+    const id   = `sa_${key}_s${server}`;
+    const boss = SHADOW_BOSSES.find(b => b.id === id);
+    log(interaction.user, `SA: Selected server ${server} for ${boss.name}`);
     const modal = new ModalBuilder()
       .setCustomId(`sa_killtime_${boss.id}`)
       .setTitle(`Kill Time — ${boss.name}`);
@@ -1503,6 +1684,20 @@ client.on(Events.InteractionCreate, async interaction => {
         .setLabel("HH:MM (24h, server time) or 'now'")
         .setStyle(TextInputStyle.Short)
         .setPlaceholder("e.g. 21:34 or now")
+    ));
+    return interaction.showModal(modal);
+  }
+
+  // ── SA: MULTI-INSTANCE FIXED — manual pick ──
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith("sa_pick_instance_")) {
+    const id   = interaction.values[0];
+    const boss = SHADOW_BOSSES.find(b => b.id === id);
+    log(interaction.user, `SA: Manually picked instance ${boss.name}`);
+    const modal = new ModalBuilder()
+      .setCustomId(`sa_killtime_${id}`)
+      .setTitle(`Kill Time — ${boss.name}`);
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
     ));
     return interaction.showModal(modal);
   }
@@ -1649,12 +1844,58 @@ client.on(Events.InteractionCreate, async interaction => {
     });
   }
 
-  // ── WB: SERVER SELECTED — show modal ──
+  // ── WB: SERVER SELECTED ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("wb_server_select_")) {
     const key    = interaction.customId.replace("wb_server_select_", "");
     const server = parseInt(interaction.values[0], 10);
-    const id     = `wb_${key}_s${server}`;
-    const boss   = WORLD_BOSSES.find(b => b.id === id);
+
+    if (isMultiInstanceWB(key)) {
+      // Try auto-pick a free slot
+      const boss = pickNextWBInstance(key, server);
+      if (boss) {
+        log(interaction.user, `WB: Auto-picked ${boss.name} for kill`);
+        const modal = new ModalBuilder()
+          .setCustomId(`wb_killtime_${boss.id}`)
+          .setTitle(`Kill Time — ${boss.name}`);
+        modal.addComponents(new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("time")
+            .setLabel("HH:MM (24h, server time) or 'now'")
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder("e.g. 21:34 or now")
+        ));
+        return interaction.showModal(modal);
+      } else {
+        // All slots occupied — ask which to update
+        const instances = getWBInstances(key, server);
+        const now = Date.now();
+        const cfg = WORLD_BOSS_CONFIG[key];
+        const menu = new StringSelectMenuBuilder()
+          .setCustomId(`wb_pick_instance_${key}_s${server}`)
+          .setPlaceholder("All slots busy — pick which to update")
+          .addOptions(instances.map(b => {
+            const e = data.kills[b.id];
+            let status = "🟢 READY";
+            if (e) {
+              const cd        = e.respawnTime - now;
+              const windowLeft = e.respawnTime + cfg.windowMs - now;
+              if (cd > 0) status = `🔴 ${format(cd)}`;
+              else if (windowLeft > 0) status = `🟢 WIN ${format(windowLeft)}`;
+              else status = `⚠️ MISSED`;
+            }
+            return { label: `#${b.index} — ${status}`, value: b.id };
+          }));
+        return interaction.reply({
+          content: `⚠️ **[World Boss] ${WORLD_BOSSES.find(b => b.key === key).label} S${server}** — All slots are active. Pick which instance to update:`,
+          components: [new ActionRowBuilder().addComponents(menu)],
+          flags: MessageFlags.Ephemeral
+        });
+      }
+    }
+
+    // Single-instance WB (Borgar)
+    const id   = `wb_${key}_s${server}`;
+    const boss = WORLD_BOSSES.find(b => b.id === id);
     log(interaction.user, `WB: Selected server ${server} for ${boss.name}`);
     const modal = new ModalBuilder()
       .setCustomId(`wb_killtime_${id}`)
@@ -1665,6 +1906,20 @@ client.on(Events.InteractionCreate, async interaction => {
         .setLabel("HH:MM (24h, server time) or 'now'")
         .setStyle(TextInputStyle.Short)
         .setPlaceholder("e.g. 21:34 or now")
+    ));
+    return interaction.showModal(modal);
+  }
+
+  // ── WB: MULTI-INSTANCE — manual pick ──
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith("wb_pick_instance_")) {
+    const id   = interaction.values[0];
+    const boss = WORLD_BOSSES.find(b => b.id === id);
+    log(interaction.user, `WB: Manually picked instance ${boss.name}`);
+    const modal = new ModalBuilder()
+      .setCustomId(`wb_killtime_${id}`)
+      .setTitle(`Kill Time — ${boss.name}`);
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
     ));
     return interaction.showModal(modal);
   }
@@ -1852,11 +2107,13 @@ client.on(Events.InteractionCreate, async interaction => {
     }
   }
 
-  // ── SA: INSERT TIME — server picker → goblin index or direct modal ──
+  // ── SA: INSERT TIME — server picker → goblin index / multi-instance / direct modal ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("sa_insert_server_select_")) {
     const key    = interaction.customId.replace("sa_insert_server_select_", "");
     const server = parseInt(interaction.values[0], 10);
-    const isGoblinType = SHADOW_BOSSES.find(b => b.key === key)?.type === "goblin";
+    const isGoblinType   = SHADOW_BOSSES.find(b => b.key === key)?.type === "goblin";
+    const isMultiSAFixed = isMultiInstanceSAFixed(key);
+
     if (isGoblinType) {
       const instances = getGoblinInstances(key, server);
       const now = Date.now();
@@ -1880,16 +2137,52 @@ client.on(Events.InteractionCreate, async interaction => {
         components: [new ActionRowBuilder().addComponents(menu)],
         flags: MessageFlags.Ephemeral
       });
-    } else {
-      const id   = `sa_${key}_s${server}`;
-      const boss = SHADOW_BOSSES.find(b => b.id === id);
-      log(interaction.user, `SA Insert: selected ${boss.name}`);
-      const modal = new ModalBuilder().setCustomId(`sa_killtime_${id}`).setTitle(`Insert Kill Time — ${boss.name}`);
-      modal.addComponents(new ActionRowBuilder().addComponents(
-        new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-      ));
-      return interaction.showModal(modal);
     }
+
+    if (isMultiSAFixed) {
+      // Always show instance picker for manual insert
+      const instances = getSAFixedInstances(key, server);
+      const now = Date.now();
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId(`sa_insert_fixed_select_${key}_s${server}`)
+        .setPlaceholder("Select instance #")
+        .addOptions(instances.map(b => {
+          const e = data.kills[b.id];
+          let status = "🟢 READY";
+          if (e) {
+            const cd = e.respawnTime - now;
+            status = cd > 0 ? `🔴 ${format(cd)}` : `🟡 SPAWNED`;
+          }
+          return { label: `#${b.index} — ${status}`, value: b.id };
+        }));
+      return interaction.reply({
+        content: `📝 **${SHADOW_BOSSES.find(b => b.key === key).label} S${server}** — Pick which instance to update:`,
+        components: [new ActionRowBuilder().addComponents(menu)],
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    // Single-instance SA fixed
+    const id   = `sa_${key}_s${server}`;
+    const boss = SHADOW_BOSSES.find(b => b.id === id);
+    log(interaction.user, `SA Insert: selected ${boss.name}`);
+    const modal = new ModalBuilder().setCustomId(`sa_killtime_${id}`).setTitle(`Insert Kill Time — ${boss.name}`);
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
+    ));
+    return interaction.showModal(modal);
+  }
+
+  // ── SA: INSERT — multi-instance fixed boss picker → modal ──
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith("sa_insert_fixed_select_")) {
+    const id   = interaction.values[0];
+    const boss = SHADOW_BOSSES.find(b => b.id === id);
+    log(interaction.user, `SA Insert: selected fixed instance ${boss.name}`);
+    const modal = new ModalBuilder().setCustomId(`sa_killtime_${id}`).setTitle(`Insert Kill Time — ${boss.name}`);
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
+    ));
+    return interaction.showModal(modal);
   }
 
   // ── SA: INSERT TIME — goblin individual select → modal ──
@@ -1904,13 +2197,54 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.showModal(modal);
   }
 
-  // ── WB: INSERT TIME — server picker → modal ──
+  // ── WB: INSERT TIME — server picker → multi-instance picker or direct modal ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("wb_insert_server_select_")) {
     const key    = interaction.customId.replace("wb_insert_server_select_", "");
     const server = parseInt(interaction.values[0], 10);
-    const id     = `wb_${key}_s${server}`;
-    const boss   = WORLD_BOSSES.find(b => b.id === id);
+
+    if (isMultiInstanceWB(key)) {
+      // Always show instance picker for manual insert
+      const instances = getWBInstances(key, server);
+      const now = Date.now();
+      const cfg = WORLD_BOSS_CONFIG[key];
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId(`wb_insert_instance_select_${key}_s${server}`)
+        .setPlaceholder("Select instance #")
+        .addOptions(instances.map(b => {
+          const e = data.kills[b.id];
+          let status = "🟢 READY";
+          if (e) {
+            const cd        = e.respawnTime - now;
+            const windowLeft = e.respawnTime + cfg.windowMs - now;
+            if (cd > 0) status = `🔴 ${format(cd)}`;
+            else if (windowLeft > 0) status = `🟢 WIN ${format(windowLeft)}`;
+            else status = `⚠️ MISSED`;
+          }
+          return { label: `#${b.index} — ${status}`, value: b.id };
+        }));
+      return interaction.reply({
+        content: `📝 **[WB] ${WORLD_BOSSES.find(b => b.key === key).label} S${server}** — Pick which instance to update:`,
+        components: [new ActionRowBuilder().addComponents(menu)],
+        flags: MessageFlags.Ephemeral
+      });
+    }
+
+    // Single-instance WB (Borgar)
+    const id   = `wb_${key}_s${server}`;
+    const boss = WORLD_BOSSES.find(b => b.id === id);
     log(interaction.user, `WB Insert: selected ${boss.name}`);
+    const modal = new ModalBuilder().setCustomId(`wb_killtime_${id}`).setTitle(`Insert Kill Time — ${boss.name}`);
+    modal.addComponents(new ActionRowBuilder().addComponents(
+      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
+    ));
+    return interaction.showModal(modal);
+  }
+
+  // ── WB: INSERT — multi-instance picker → modal ──
+  if (interaction.isStringSelectMenu() && interaction.customId.startsWith("wb_insert_instance_select_")) {
+    const id   = interaction.values[0];
+    const boss = WORLD_BOSSES.find(b => b.id === id);
+    log(interaction.user, `WB Insert: selected instance ${boss.name}`);
     const modal = new ModalBuilder().setCustomId(`wb_killtime_${id}`).setTitle(`Insert Kill Time — ${boss.name}`);
     modal.addComponents(new ActionRowBuilder().addComponents(
       new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
@@ -1974,13 +2308,16 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (isWorld) {
       const bossesInCategory = WORLD_BOSSES.filter(b => b.key === key);
+      const isMulti = isMultiInstanceWB(key);
+      const options = [
+        ...bossesInCategory.map(b => ({ label: `Reset ${b.name}`, value: b.id })),
+        { label: `Reset ALL ${bossesInCategory[0].label}`, value: `RESET_WB_KEY_${key}` },
+      ];
+      // For multi-instance: also offer per-server reset
       const specificMenu = new StringSelectMenuBuilder()
         .setCustomId("sa_reset_select")
         .setPlaceholder("Select specific boss to reset")
-        .addOptions([
-          ...bossesInCategory.map(b => ({ label: `Reset ${b.name}`, value: b.id })),
-          { label: `Reset ALL ${bossesInCategory[0].label}`, value: `RESET_WB_KEY_${key}` },
-        ]);
+        .addOptions(options);
       return interaction.reply({
         content: `🧹 **[WB] ${bossesInCategory[0].label}** — Select which to reset:`,
         components: [new ActionRowBuilder().addComponents(specificMenu)],
