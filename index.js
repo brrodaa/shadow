@@ -67,7 +67,7 @@ let logMessage    = null;
 let missedCount      = {};
 let repinInProgress  = false;
 let lastBackupRepost = 0;
-let lastRepinTime    = 0; // tracks last periodic repin
+let lastRepinTime    = 0;
 
 const BACKUP_REPOST_COOLDOWN_MS = 60 * 1000;
 const BOT_START_TIME   = Date.now();
@@ -154,7 +154,7 @@ function buildShadowBosses() {
 const SHADOW_BOSSES = buildShadowBosses();
 
 // =====================
-// WORLD BOSSES (Borgar / Dreadhorn / Moltragon)
+// WORLD BOSSES
 // =====================
 const HOUR = 60 * 60 * 1000;
 
@@ -213,7 +213,7 @@ function getWorldBossConfig(id) {
 }
 
 // =====================
-// MULTI-INSTANCE WB HELPERS (Dreadhorn / Moltragon)
+// MULTI-INSTANCE WB HELPERS
 // =====================
 function getWBInstances(key, server) {
   return WORLD_BOSSES.filter(b => b.key === key && b.server === server);
@@ -241,7 +241,7 @@ function pickNextWBInstance(key, server) {
 }
 
 // =====================
-// MULTI-INSTANCE SA HELPERS (Muggron)
+// MULTI-INSTANCE SA HELPERS
 // =====================
 function getSAFixedInstances(key, server) {
   return SHADOW_BOSSES.filter(b => b.key === key && b.server === server);
@@ -632,7 +632,7 @@ async function updateLogMessage() {
   try { await logMessage.edit({ embeds: [buildLogEmbed()] }); }
   catch (err) {
     if (err.code !== 10008) console.error("[Log] Update failed:", err.message ?? err);
-    else logMessage = null; // message was deleted, will be recreated on next repin
+    else logMessage = null;
   }
 }
 
@@ -744,7 +744,7 @@ async function clearEveryoneWarning(key) {
 }
 
 // =====================
-// SHADOW ABYSS — SPAWN WINDOW EMBEDS & COMPONENTS (goblins)
+// SHADOW ABYSS — SPAWN WINDOW EMBEDS & COMPONENTS
 // =====================
 function buildSASpawnWindowEmbed(boss, windowStart, windowEnd) {
   const remaining = windowEnd - Date.now();
@@ -864,7 +864,81 @@ function buildWBMissedWindowComponents(id) {
 }
 
 // =====================
-// SHADOW ABYSS DASHBOARD EMBED
+// DASHBOARD HELPERS — goblin-style inline status for any multi-instance group
+// =====================
+
+/**
+ * Renders a single goblin instance slot as a short status string.
+ * e.g. "#1 🟢 READY" | "#2 🔴 2h 30m" | "#3 🟢 45m"
+ */
+function renderGoblinSlot(b) {
+  const now      = Date.now();
+  const e        = data.kills[b.id];
+  const advCount = missedCount[b.id] || 0;
+  const locked   = advCount >= SA_MAX_AUTO_ADVANCE;
+  if (!e) return `#${b.index} 🟢 READY`;
+  const cooldown   = e.respawnTime - now;
+  const windowEnd  = e.respawnTime + SA_GOBLIN_WINDOW_MS;
+  const windowLeft = windowEnd - now;
+  if (cooldown > 0) {
+    const isMissed = !!missedWindowMessages[b.id];
+    const missStr  = isMissed ? ` ⚠️${advCount}/${SA_MAX_AUTO_ADVANCE}${locked ? "🔒" : ""}` : "";
+    return `#${b.index} 🔴 ${format(cooldown)}${missStr}`;
+  }
+  if (windowLeft > 0) return `#${b.index} 🟢 ${format(windowLeft)}`;
+  if (locked) return `#${b.index} 🔒`;
+  return `#${b.index} ⚠️(${advCount})`;
+}
+
+/**
+ * Renders a single SA fixed multi-instance slot (Muggron) the same way as goblins.
+ */
+function renderSAFixedSlot(b) {
+  const now      = Date.now();
+  const e        = data.kills[b.id];
+  const advCount = missedCount[b.id] || 0;
+  if (!e) return `#${b.index} 🟢 READY`;
+  const cooldown  = e.respawnTime - now;
+  const tsRespawn = Math.floor(e.respawnTime / 1000);
+  if (cooldown > 0) {
+    const isMissed = !!missedWindowMessages[b.id];
+    if (isMissed) return `#${b.index} ⚠️ ${format(cooldown)}(${advCount}m)`;
+    return `#${b.index} 🔴 ${format(cooldown)}`;
+  }
+  if (cooldown >= -5 * 60 * 1000) return `#${b.index} 🟡 SPAWNED`;
+  return `#${b.index} ⚠️(${advCount})`;
+}
+
+/**
+ * Renders a single WB multi-instance slot (Dreadhorn/Moltragon) the same way as goblins.
+ */
+function renderWBMultiSlot(b) {
+  const now      = Date.now();
+  const e        = data.kills[b.id];
+  const cfg      = getWorldBossConfig(b.id);
+  const advCount = missedCount[b.id] || 0;
+  const isMissed = !!missedWindowMessages[b.id];
+  if (!e) return `#${b.index} 🟢 READY`;
+  const cooldown   = e.respawnTime - now;
+  const windowEnd  = e.respawnTime + cfg.windowMs;
+  const windowLeft = windowEnd - now;
+  const tsRespawn  = Math.floor(e.respawnTime / 1000);
+  if (cooldown > 0) {
+    if (isMissed) return `#${b.index} ⚠️ ${format(cooldown)}(${advCount}m)`;
+    return `#${b.index} 🔴 ${format(cooldown)}`;
+  }
+  if (windowLeft > 0) return `#${b.index} 🟢 WIN ${format(windowLeft)}`;
+  if (advCount >= cfg.maxMissed) return `#${b.index} 🚨(${advCount}x)`;
+  return `#${b.index} ⚠️(${advCount}x)`;
+}
+
+// =====================
+// SHADOW ABYSS DASHBOARD EMBED  (compact regrouped layout)
+// =====================
+// Layout:
+//   Section 1 — 👺 Goblins (one field per boss-type, all 3 servers inline)
+//   Section 2 — 👹 SA Fixed Bosses (one field per boss-type, all 3 servers inline)
+//   Section 3 — 🌍 World Bosses (one field per boss-type, all 3 servers inline)
 // =====================
 function buildShadowEmbed() {
   const now   = Date.now();
@@ -873,135 +947,108 @@ function buildShadowEmbed() {
     .setColor(0x7b00ff)
     .setFooter({ text: "Auto-updates every 15s" });
 
-  const goblinKeys    = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
-  const fixedKeys     = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
+  // ── Section 1: Goblins ──────────────────────────────────────────────────
+  embed.addFields({ name: "👺 ─── Goblins ───", value: "\u200B", inline: false });
 
-  embed.addFields({ name: "👺 ─── Goblins ───", value: "\u200B" });
+  const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
   for (const key of goblinKeys) {
     const first    = SHADOW_BOSSES.find(b => b.key === key);
     const qty      = GOBLIN_QTY[key];
     const respawnH = SA_RESPAWN_H["goblin"];
-    for (const s of SA_SERVERS) {
+    // One field per boss type; each server on its own line inside that field
+    const lines = SA_SERVERS.map(s => {
       const instances = getGoblinInstances(key, s);
-      const parts = instances.map(b => {
-        const e        = data.kills[b.id];
-        const advCount = missedCount[b.id] || 0;
-        const locked   = advCount >= SA_MAX_AUTO_ADVANCE;
-        if (!e) return `#${b.index} 🟢 READY`;
-        const cooldown   = e.respawnTime - now;
-        const windowEnd  = e.respawnTime + SA_GOBLIN_WINDOW_MS;
-        const windowLeft = windowEnd - now;
-        if (cooldown > 0) {
-          const isMissed = !!missedWindowMessages[b.id];
-          const missStr  = isMissed ? ` ⚠️${advCount}/${SA_MAX_AUTO_ADVANCE}${locked ? "🔒" : ""}` : "";
-          return `#${b.index} 🔴 ${format(cooldown)}${missStr}`;
-        }
-        if (windowLeft > 0) return `#${b.index} 🟢 ${format(windowLeft)}`;
-        if (locked) return `#${b.index} 🔒 LOCKED`;
-        return `#${b.index} ⚠️ MISSED(${advCount})`;
-      });
-      const headerLabel = `${first.label} S${s} (x${qty}) — ${respawnH}h+1h`;
-      embed.addFields({ name: `• ${headerLabel}`, value: parts.join(" | ") });
-    }
+      const slots = instances.map(b => renderGoblinSlot(b)).join(" │ ");
+      return `**S${s}:** ${slots}`;
+    });
+    embed.addFields({
+      name:   `${first.label} (x${qty}) — ${respawnH}h respawn`,
+      value:  lines.join("\n"),
+      inline: false,
+    });
   }
 
-  embed.addFields({ name: "👹 ─── World Bosses ───", value: "\u200B" });
-  for (const key of fixedKeys) {
-    const bossesForKey = SHADOW_BOSSES.filter(b => b.key === key);
-    const first        = bossesForKey[0];
-    const respawnH     = SA_RESPAWN_H[first.type];
-    const isMulti      = isMultiInstanceSAFixed(key);
-    const headerLabel  = `${first.label} — ${respawnH}h respawn${isMulti ? ` (x${first.qty})` : ""}`;
+  // ── Section 2: SA Fixed Bosses ──────────────────────────────────────────
+  embed.addFields({ name: "👹 ─── Shadow Abyss Bosses ───", value: "\u200B", inline: false });
 
-    if (isMulti) {
-      for (const s of SA_SERVERS) {
+  const fixedKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
+  for (const key of fixedKeys) {
+    const first      = SHADOW_BOSSES.find(b => b.key === key);
+    const respawnH   = SA_RESPAWN_H[first.type];
+    const isMulti    = isMultiInstanceSAFixed(key);
+
+    const lines = SA_SERVERS.map(s => {
+      if (isMulti) {
+        // Same inline format as goblins
         const instances = getSAFixedInstances(key, s);
-        const parts = instances.map(b => {
-          const e        = data.kills[b.id];
-          const advCount = missedCount[b.id] || 0;
-          if (!e) return `#${b.index} 🟢 READY`;
-          const cooldown  = e.respawnTime - now;
-          const tsRespawn = Math.floor(e.respawnTime / 1000);
-          if (cooldown > 0) {
-            const isMissed = !!missedWindowMessages[b.id];
-            if (isMissed) return `#${b.index} ⚠️ ${format(cooldown)} (${advCount}m) — <t:${tsRespawn}:t>`;
-            return `#${b.index} 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
-          }
-          if (cooldown >= -5 * 60 * 1000) return `#${b.index} 🟡 SPAWNED — log kill!`;
-          return `#${b.index} ⚠️ MISSED(${advCount})`;
-        });
-        embed.addFields({ name: `• ${headerLabel} S${s}`, value: parts.join(" | ") });
-      }
-    } else {
-      const lines = bossesForKey.map(b => {
-        const e        = data.kills[b.id];
-        const advCount = missedCount[b.id] || 0;
-        if (!e) return `**S${b.server}**: 🟢 READY`;
+        const slots = instances.map(b => renderSAFixedSlot(b)).join(" │ ");
+        return `**S${s}:** ${slots}`;
+      } else {
+        const id        = `sa_${key}_s${s}`;
+        const b         = SHADOW_BOSSES.find(x => x.id === id);
+        const e         = data.kills[id];
+        const advCount  = missedCount[id] || 0;
+        if (!e) return `**S${s}:** 🟢 READY`;
         const cooldown  = e.respawnTime - now;
         const tsRespawn = Math.floor(e.respawnTime / 1000);
         if (cooldown > 0) {
-          const isMissed = !!missedWindowMessages[b.id];
-          if (isMissed) return `**S${b.server}**: ⚠️ ${format(cooldown)} (${advCount} missed) — <t:${tsRespawn}:t>`;
-          return `**S${b.server}**: 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
+          const isMissed = !!missedWindowMessages[id];
+          if (isMissed) return `**S${s}:** ⚠️ ${format(cooldown)} (${advCount}m) — <t:${tsRespawn}:t>`;
+          return `**S${s}:** 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
         }
-        if (cooldown >= -5 * 60 * 1000) return `**S${b.server}**: 🟡 SPAWNED — <t:${tsRespawn}:t> — log kill!`;
-        return `**S${b.server}**: ⚠️ MISSED (${advCount}x) — was <t:${tsRespawn}:t>`;
-      });
-      embed.addFields({ name: `• ${headerLabel}`, value: lines.join("\n") });
-    }
+        if (cooldown >= -5 * 60 * 1000) return `**S${s}:** 🟡 SPAWNED — <t:${tsRespawn}:t> — log kill!`;
+        return `**S${s}:** ⚠️ MISSED (${advCount}x) — was <t:${tsRespawn}:t>`;
+      }
+    });
+
+    embed.addFields({
+      name:   `${first.label}${isMulti ? ` (x${first.qty})` : ""} — ${respawnH}h respawn`,
+      value:  lines.join("\n"),
+      inline: false,
+    });
   }
 
-  embed.addFields({ name: "🌍 ─── Borgar / Dreadhorn / Moltragon ───", value: "\u200B" });
+  // ── Section 3: World Bosses ─────────────────────────────────────────────
+  embed.addFields({ name: "🌍 ─── World Bosses ───", value: "\u200B", inline: false });
+
   const wbKeys = [...new Set(WORLD_BOSSES.map(b => b.key))];
   for (const key of wbKeys) {
-    const cfg      = WORLD_BOSS_CONFIG[key];
-    const respawnH = cfg.respawnMs / HOUR;
-    const isMulti  = isMultiInstanceWB(key);
+    const cfg       = WORLD_BOSS_CONFIG[key];
+    const respawnH  = cfg.respawnMs / HOUR;
+    const isMulti   = isMultiInstanceWB(key);
     const firstName = WORLD_BOSSES.find(b => b.key === key).label;
 
-    if (isMulti) {
-      for (const s of SA_SERVERS) {
+    const lines = SA_SERVERS.map(s => {
+      if (isMulti) {
+        // Same inline format as goblins
         const instances = getWBInstances(key, s);
-        const parts = instances.map(b => {
-          const e          = data.kills[b.id];
-          const advCount   = missedCount[b.id] || 0;
-          const isMissed   = !!missedWindowMessages[b.id];
-          if (!e) return `#${b.index} 🟢 READY`;
-          const cooldown   = e.respawnTime - now;
-          const windowEnd  = e.respawnTime + cfg.windowMs;
-          const windowLeft = windowEnd - now;
-          const tsRespawn  = Math.floor(e.respawnTime / 1000);
-          if (cooldown > 0) {
-            if (isMissed) return `#${b.index} ⚠️ ${format(cooldown)} (${advCount}m) — <t:${tsRespawn}:t>`;
-            return `#${b.index} 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
-          }
-          if (windowLeft > 0) return `#${b.index} 🟢 WIN ${format(windowLeft)}`;
-          if (advCount >= cfg.maxMissed) return `#${b.index} 🚨 Wrong(${advCount}x)`;
-          return `#${b.index} ⚠️ MISSED(${advCount}x)`;
-        });
-        embed.addFields({ name: `• ${firstName} S${s} (x${cfg.qty}) — ${respawnH}h`, value: parts.join(" | ") });
-      }
-    } else {
-      const bossesForKey = WORLD_BOSSES.filter(b => b.key === key);
-      const lines = bossesForKey.map(b => {
-        const e          = data.kills[b.id];
-        const advCount   = missedCount[b.id] || 0;
-        const isMissed   = !!missedWindowMessages[b.id];
-        if (!e) return `**S${b.server}**: 🟢 READY`;
+        const slots = instances.map(b => renderWBMultiSlot(b)).join(" │ ");
+        return `**S${s}:** ${slots}`;
+      } else {
+        const id        = `wb_${key}_s${s}`;
+        const e         = data.kills[id];
+        const advCount  = missedCount[id] || 0;
+        const isMissed  = !!missedWindowMessages[id];
+        if (!e) return `**S${s}:** 🟢 READY`;
         const cooldown   = e.respawnTime - now;
         const windowEnd  = e.respawnTime + cfg.windowMs;
         const windowLeft = windowEnd - now;
         const tsRespawn  = Math.floor(e.respawnTime / 1000);
         if (cooldown > 0) {
-          if (isMissed) return `**S${b.server}**: ⚠️ ${format(cooldown)} (${advCount} missed) — <t:${tsRespawn}:t>`;
-          return `**S${b.server}**: 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
+          if (isMissed) return `**S${s}:** ⚠️ ${format(cooldown)} (${advCount}m) — <t:${tsRespawn}:t>`;
+          return `**S${s}:** 🔴 ${format(cooldown)} — <t:${tsRespawn}:t>`;
         }
-        if (windowLeft > 0) return `**S${b.server}**: 🟢 WINDOW ${format(windowLeft)} — <t:${tsRespawn}:t>`;
-        if (advCount >= cfg.maxMissed) return `**S${b.server}**: 🚨 Wrong (${advCount}x missed) — update manually!`;
-        return `**S${b.server}**: ⚠️ MISSED (${advCount}x) — was <t:${tsRespawn}:t>`;
-      });
-      embed.addFields({ name: `• ${firstName} — ${respawnH}h respawn`, value: lines.join("\n") });
-    }
+        if (windowLeft > 0) return `**S${s}:** 🟢 WINDOW ${format(windowLeft)} — <t:${tsRespawn}:t>`;
+        if (advCount >= cfg.maxMissed) return `**S${s}:** 🚨 Wrong (${advCount}x) — update manually!`;
+        return `**S${s}:** ⚠️ MISSED (${advCount}x) — was <t:${tsRespawn}:t>`;
+      }
+    });
+
+    embed.addFields({
+      name:   `${firstName}${isMulti ? ` (x${cfg.qty})` : ""} — ${respawnH}h respawn`,
+      value:  lines.join("\n"),
+      inline: false,
+    });
   }
 
   return embed;
@@ -1078,14 +1125,12 @@ async function repinDashboard(channel) {
   try {
     const now = Date.now();
 
-    // 1) Log message — always first
     if (logMessage) logMessage.delete().catch(() => {});
     logMessage = await channel.send({
       embeds: [buildLogEmbed()],
       flags:  MessageFlags.SuppressNotifications
     }).catch(err => { console.error("[Repin] Failed to re-post log message:", err.message ?? err); return null; });
 
-    // 2) Main dashboard
     const newDashboard = await channel.send({
       embeds: [buildShadowEmbed()], components: buildShadowButtons(), flags: MessageFlags.SuppressNotifications
     }).catch(err => { console.error("[Repin] Failed to post dashboard:", err.message ?? err); return null; });
@@ -1094,7 +1139,6 @@ async function repinDashboard(channel) {
     if (dashboardMessage) dashboardMessage.delete().catch(() => {});
     dashboardMessage = newDashboard;
 
-    // 3) Active spawn windows
     for (const id of Object.keys(spawnWindowMessages)) {
       const w = spawnWindowMessages[id];
       if (w.msg) w.msg.delete().catch(() => {});
@@ -1108,7 +1152,6 @@ async function repinDashboard(channel) {
       } else { delete spawnWindowMessages[id]; }
     }
 
-    // 4) Missed windows
     for (const id of Object.keys(missedWindowMessages)) {
       const w = missedWindowMessages[id];
       if (w.nextWindowStart > now) { if (w.msg) { w.msg.delete().catch(() => {}); w.msg = null; } continue; }
@@ -1297,7 +1340,6 @@ function startLoop() {
       if (!channel) return;
       const now = Date.now();
 
-      // Periodic repin: float the whole stack to the bottom every REPIN_INTERVAL_MS
       if (now - lastRepinTime >= REPIN_INTERVAL_MS) {
         console.log("[Loop] Periodic repin triggered.");
         if (!repinInProgress) repinDashboard(channel);
@@ -1313,12 +1355,10 @@ function startLoop() {
         return;
       }
 
-      // Update dashboard in place
       try {
         await dashboardMessage.edit({ embeds: [buildShadowEmbed()], components: buildShadowButtons() });
       } catch (err) {
         if (err.code === 10008) {
-          // Dashboard was deleted — repin the full stack
           console.warn("[Loop] Dashboard deleted — repinning full stack.");
           dashboardMessage = null;
           if (!repinInProgress) repinDashboard(channel);
@@ -1331,7 +1371,6 @@ function startLoop() {
         return;
       }
 
-      // Update active spawn window cards in place
       for (const [id, w] of Object.entries(spawnWindowMessages)) {
         if (!w.msg) continue;
         const isWorld = !!w.isWorld;
@@ -1343,7 +1382,6 @@ function startLoop() {
         } catch (err) { if (err.code === 10008) delete spawnWindowMessages[id]; }
       }
 
-      // Update missed window cards in place
       for (const [id, w] of Object.entries(missedWindowMessages)) {
         if (!w.msg) continue;
         const isWorld  = !!w.isWorld;
@@ -1566,7 +1604,6 @@ client.once(Events.ClientReady, async () => {
   try { await initBackupMessage(await client.channels.fetch(LOG_CHANNEL_ID)); }
   catch (err) { console.error("[Backup] Could not init:", err.message ?? err); }
 
-  // Post stack in correct order: Log → Dashboard → windows (none yet at startup)
   logMessage = await channel.send({
     embeds: [buildLogEmbed()],
     flags:  MessageFlags.SuppressNotifications
