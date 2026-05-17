@@ -48,6 +48,8 @@ const TICK_RATE  = 15000;
 const MAX_UNDO   = 10;
 const EVERYONE_WARNING_LIFESPAN_MS = 10 * 60 * 1000;
 const WINDOW_GRACE_MS              = 15 * 60 * 1000;
+// How often to repin the full stack to the bottom of the channel (30 min)
+const REPIN_INTERVAL_MS            = 30 * 60 * 1000;
 
 // =====================
 // STATE
@@ -65,6 +67,7 @@ let logMessage    = null;
 let missedCount      = {};
 let repinInProgress  = false;
 let lastBackupRepost = 0;
+let lastRepinTime    = 0; // tracks last periodic repin
 
 const BACKUP_REPOST_COOLDOWN_MS = 60 * 1000;
 const BOT_START_TIME   = Date.now();
@@ -119,7 +122,6 @@ function buildShadowBosses() {
           });
         }
       } else if (def.qty && def.qty > 1) {
-        // Multi-instance fixed boss (e.g. Muggron x2)
         for (let i = 1; i <= def.qty; i++) {
           list.push({
             id:     `sa_${def.key}_s${s}_${i}`,
@@ -221,16 +223,12 @@ function isMultiInstanceWB(key) {
   return (WORLD_BOSS_CONFIG[key]?.qty || 1) > 1;
 }
 
-/** Pick the next available slot for a multi-instance WB kill.
- *  Returns null if all slots are occupied (caller must ask user to pick). */
 function pickNextWBInstance(key, server) {
   const instances = getWBInstances(key, server);
   if (instances.length <= 1) return instances[0] ?? null;
   const now = Date.now();
-  // First: any slot with no timer at all
   const empty = instances.find(b => !data.kills[b.id]);
   if (empty) return empty;
-  // Second: slot whose respawn window is still active
   const inWindow = instances.find(b => {
     const e = data.kills[b.id];
     if (!e) return false;
@@ -239,7 +237,6 @@ function pickNextWBInstance(key, server) {
     return e.respawnTime <= now && windowEnd > now;
   });
   if (inWindow) return inWindow;
-  // All slots occupied — caller should prompt user
   return null;
 }
 
@@ -255,15 +252,12 @@ function isMultiInstanceSAFixed(key) {
   return sample && sample.qty > 1 && sample.type !== "goblin";
 }
 
-/** Pick next available slot for a multi-instance SA fixed boss.
- *  Returns null if all slots are occupied (caller must ask user to pick). */
 function pickNextSAFixedInstance(key, server) {
   const instances = getSAFixedInstances(key, server);
   if (instances.length <= 1) return instances[0] ?? null;
   const now = Date.now();
   const empty = instances.find(b => !data.kills[b.id]);
   if (empty) return empty;
-  // Slot whose timer expired (past respawn time, within 5-min grace)
   const spawned = instances.find(b => {
     const e = data.kills[b.id];
     if (!e) return false;
@@ -271,7 +265,7 @@ function pickNextSAFixedInstance(key, server) {
     return cooldown <= 0 && cooldown >= -5 * 60 * 1000;
   });
   if (spawned) return spawned;
-  return null; // all slots taken — ask user
+  return null;
 }
 
 // =====================
@@ -359,7 +353,6 @@ function save() {
 function restoreSpawnWarningFlags() {
   const now = Date.now();
 
-  // Shadow Abyss bosses
   for (const b of SHADOW_BOSSES) {
     const e = data.kills[b.id];
     if (!e) {
@@ -413,7 +406,6 @@ function restoreSpawnWarningFlags() {
     }
   }
 
-  // World bosses
   for (const b of WORLD_BOSSES) {
     const e = data.kills[b.id];
     if (!e) {
@@ -640,6 +632,7 @@ async function updateLogMessage() {
   try { await logMessage.edit({ embeds: [buildLogEmbed()] }); }
   catch (err) {
     if (err.code !== 10008) console.error("[Log] Update failed:", err.message ?? err);
+    else logMessage = null; // message was deleted, will be recreated on next repin
   }
 }
 
@@ -883,7 +876,6 @@ function buildShadowEmbed() {
   const goblinKeys    = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
   const fixedKeys     = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
 
-  // ── Goblin section ──
   embed.addFields({ name: "👺 ─── Goblins ───", value: "\u200B" });
   for (const key of goblinKeys) {
     const first    = SHADOW_BOSSES.find(b => b.key === key);
@@ -913,7 +905,6 @@ function buildShadowEmbed() {
     }
   }
 
-  // ── World Bosses (SA fixed) section ──
   embed.addFields({ name: "👹 ─── World Bosses ───", value: "\u200B" });
   for (const key of fixedKeys) {
     const bossesForKey = SHADOW_BOSSES.filter(b => b.key === key);
@@ -923,7 +914,6 @@ function buildShadowEmbed() {
     const headerLabel  = `${first.label} — ${respawnH}h respawn${isMulti ? ` (x${first.qty})` : ""}`;
 
     if (isMulti) {
-      // Group by server, show each instance
       for (const s of SA_SERVERS) {
         const instances = getSAFixedInstances(key, s);
         const parts = instances.map(b => {
@@ -961,7 +951,6 @@ function buildShadowEmbed() {
     }
   }
 
-  // ── Borgar / Dreadhorn / Moltragon section ──
   embed.addFields({ name: "🌍 ─── Borgar / Dreadhorn / Moltragon ───", value: "\u200B" });
   const wbKeys = [...new Set(WORLD_BOSSES.map(b => b.key))];
   for (const key of wbKeys) {
@@ -971,7 +960,6 @@ function buildShadowEmbed() {
     const firstName = WORLD_BOSSES.find(b => b.key === key).label;
 
     if (isMulti) {
-      // Show each server group separately with all instances
       for (const s of SA_SERVERS) {
         const instances = getWBInstances(key, s);
         const parts = instances.map(b => {
@@ -1055,7 +1043,6 @@ function buildShadowButtons() {
     rows.push(row);
   }
 
-  // World boss buttons (Borgar / Dreadhorn / Moltragon)
   const wbKeys = [...new Set(WORLD_BOSSES.map(b => b.key))];
   for (let i = 0; i < wbKeys.length; i += 5) {
     const row = new ActionRowBuilder();
@@ -1083,19 +1070,31 @@ function buildShadowButtons() {
 
 // =====================
 // REPIN DASHBOARD
+// Stack order: Log → Dashboard → Active spawn windows → Missed windows
 // =====================
 async function repinDashboard(channel) {
   if (repinInProgress) { console.log("[Repin] Already in progress, skipping."); return; }
   repinInProgress = true;
   try {
     const now = Date.now();
+
+    // 1) Log message — always first
+    if (logMessage) logMessage.delete().catch(() => {});
+    logMessage = await channel.send({
+      embeds: [buildLogEmbed()],
+      flags:  MessageFlags.SuppressNotifications
+    }).catch(err => { console.error("[Repin] Failed to re-post log message:", err.message ?? err); return null; });
+
+    // 2) Main dashboard
     const newDashboard = await channel.send({
       embeds: [buildShadowEmbed()], components: buildShadowButtons(), flags: MessageFlags.SuppressNotifications
     }).catch(err => { console.error("[Repin] Failed to post dashboard:", err.message ?? err); return null; });
+
     if (!newDashboard) return;
     if (dashboardMessage) dashboardMessage.delete().catch(() => {});
     dashboardMessage = newDashboard;
 
+    // 3) Active spawn windows
     for (const id of Object.keys(spawnWindowMessages)) {
       const w = spawnWindowMessages[id];
       if (w.msg) w.msg.delete().catch(() => {});
@@ -1109,6 +1108,7 @@ async function repinDashboard(channel) {
       } else { delete spawnWindowMessages[id]; }
     }
 
+    // 4) Missed windows
     for (const id of Object.keys(missedWindowMessages)) {
       const w = missedWindowMessages[id];
       if (w.nextWindowStart > now) { if (w.msg) { w.msg.delete().catch(() => {}); w.msg = null; } continue; }
@@ -1127,12 +1127,7 @@ async function repinDashboard(channel) {
       }).catch(() => null);
     }
 
-    if (logMessage) logMessage.delete().catch(() => {});
-    logMessage = await channel.send({
-      embeds: [buildLogEmbed()],
-      flags:  MessageFlags.SuppressNotifications
-    }).catch(err => { console.error("[Repin] Failed to re-post log message:", err.message ?? err); return null; });
-
+    lastRepinTime = now;
     console.log("[Repin] Dashboard stack refreshed.");
   } finally { repinInProgress = false; }
 }
@@ -1171,7 +1166,7 @@ async function createWBSpawnWindow(boss, id, channel, windowEnd) {
 }
 
 // =====================
-// MISSED WINDOW / AUTO-ADVANCE — Shadow Abyss goblin-type (individual)
+// MISSED WINDOW / AUTO-ADVANCE — Shadow Abyss goblin-type
 // =====================
 async function handleSAMissedWindowGoblin(boss, id, channel) {
   const e = data.kills[id];
@@ -1302,6 +1297,15 @@ function startLoop() {
       if (!channel) return;
       const now = Date.now();
 
+      // Periodic repin: float the whole stack to the bottom every REPIN_INTERVAL_MS
+      if (now - lastRepinTime >= REPIN_INTERVAL_MS) {
+        console.log("[Loop] Periodic repin triggered.");
+        if (!repinInProgress) repinDashboard(channel);
+        checkSAWarnings(channel);
+        checkWBWarnings(channel);
+        return;
+      }
+
       if (!dashboardMessage) {
         if (!repinInProgress) repinDashboard(channel);
         checkSAWarnings(channel);
@@ -1309,11 +1313,12 @@ function startLoop() {
         return;
       }
 
-      // Update dashboard
+      // Update dashboard in place
       try {
         await dashboardMessage.edit({ embeds: [buildShadowEmbed()], components: buildShadowButtons() });
       } catch (err) {
         if (err.code === 10008) {
+          // Dashboard was deleted — repin the full stack
           console.warn("[Loop] Dashboard deleted — repinning full stack.");
           dashboardMessage = null;
           if (!repinInProgress) repinDashboard(channel);
@@ -1321,8 +1326,12 @@ function startLoop() {
           console.error("[Loop] Dashboard edit failed:", err.code, err.message);
           if (err.code !== 50013) dashboardMessage = null;
         }
+        checkSAWarnings(channel);
+        checkWBWarnings(channel);
+        return;
       }
 
+      // Update active spawn window cards in place
       for (const [id, w] of Object.entries(spawnWindowMessages)) {
         if (!w.msg) continue;
         const isWorld = !!w.isWorld;
@@ -1334,6 +1343,7 @@ function startLoop() {
         } catch (err) { if (err.code === 10008) delete spawnWindowMessages[id]; }
       }
 
+      // Update missed window cards in place
       for (const [id, w] of Object.entries(missedWindowMessages)) {
         if (!w.msg) continue;
         const isWorld  = !!w.isWorld;
@@ -1553,20 +1563,20 @@ client.once(Events.ClientReady, async () => {
 
   const channel = await client.channels.fetch(CHANNEL_ID);
 
-  await initLogMessage(channel);
-
   try { await initBackupMessage(await client.channels.fetch(LOG_CHANNEL_ID)); }
   catch (err) { console.error("[Backup] Could not init:", err.message ?? err); }
+
+  // Post stack in correct order: Log → Dashboard → windows (none yet at startup)
+  logMessage = await channel.send({
+    embeds: [buildLogEmbed()],
+    flags:  MessageFlags.SuppressNotifications
+  }).catch(err => { console.error("[Ready] Failed to post log message:", err.message ?? err); return null; });
 
   dashboardMessage = await channel.send({
     embeds: [buildShadowEmbed()], components: buildShadowButtons(), flags: MessageFlags.SuppressNotifications
   });
 
-  if (logMessage) logMessage.delete().catch(() => {});
-  logMessage = await channel.send({
-    embeds: [buildLogEmbed()],
-    flags:  MessageFlags.SuppressNotifications
-  }).catch(err => { console.error("[Ready] Failed to re-post log message:", err.message ?? err); return null; });
+  lastRepinTime = Date.now();
 
   startLoop();
   startBackupLoop();
@@ -1632,7 +1642,6 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (isMultiSAFixed) {
-      // Try auto-pick a free slot
       const boss = pickNextSAFixedInstance(key, server);
       if (boss) {
         log(interaction.user, `SA: Auto-picked ${boss.name} for kill`);
@@ -1648,7 +1657,6 @@ client.on(Events.InteractionCreate, async interaction => {
         ));
         return interaction.showModal(modal);
       } else {
-        // All slots taken — ask user to pick which one to overwrite
         const instances = getSAFixedInstances(key, server);
         const now = Date.now();
         const menu = new StringSelectMenuBuilder()
@@ -1671,7 +1679,6 @@ client.on(Events.InteractionCreate, async interaction => {
       }
     }
 
-    // Single-instance SA fixed
     const id   = `sa_${key}_s${server}`;
     const boss = SHADOW_BOSSES.find(b => b.id === id);
     log(interaction.user, `SA: Selected server ${server} for ${boss.name}`);
@@ -1850,7 +1857,6 @@ client.on(Events.InteractionCreate, async interaction => {
     const server = parseInt(interaction.values[0], 10);
 
     if (isMultiInstanceWB(key)) {
-      // Try auto-pick a free slot
       const boss = pickNextWBInstance(key, server);
       if (boss) {
         log(interaction.user, `WB: Auto-picked ${boss.name} for kill`);
@@ -1866,7 +1872,6 @@ client.on(Events.InteractionCreate, async interaction => {
         ));
         return interaction.showModal(modal);
       } else {
-        // All slots occupied — ask which to update
         const instances = getWBInstances(key, server);
         const now = Date.now();
         const cfg = WORLD_BOSS_CONFIG[key];
@@ -1893,7 +1898,6 @@ client.on(Events.InteractionCreate, async interaction => {
       }
     }
 
-    // Single-instance WB (Borgar)
     const id   = `wb_${key}_s${server}`;
     const boss = WORLD_BOSSES.find(b => b.id === id);
     log(interaction.user, `WB: Selected server ${server} for ${boss.name}`);
@@ -2107,7 +2111,7 @@ client.on(Events.InteractionCreate, async interaction => {
     }
   }
 
-  // ── SA: INSERT TIME — server picker → goblin index / multi-instance / direct modal ──
+  // ── SA: INSERT TIME — server picker ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("sa_insert_server_select_")) {
     const key    = interaction.customId.replace("sa_insert_server_select_", "");
     const server = parseInt(interaction.values[0], 10);
@@ -2140,7 +2144,6 @@ client.on(Events.InteractionCreate, async interaction => {
     }
 
     if (isMultiSAFixed) {
-      // Always show instance picker for manual insert
       const instances = getSAFixedInstances(key, server);
       const now = Date.now();
       const menu = new StringSelectMenuBuilder()
@@ -2162,7 +2165,6 @@ client.on(Events.InteractionCreate, async interaction => {
       });
     }
 
-    // Single-instance SA fixed
     const id   = `sa_${key}_s${server}`;
     const boss = SHADOW_BOSSES.find(b => b.id === id);
     log(interaction.user, `SA Insert: selected ${boss.name}`);
@@ -2173,7 +2175,7 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.showModal(modal);
   }
 
-  // ── SA: INSERT — multi-instance fixed boss picker → modal ──
+  // ── SA: INSERT — multi-instance fixed boss picker ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("sa_insert_fixed_select_")) {
     const id   = interaction.values[0];
     const boss = SHADOW_BOSSES.find(b => b.id === id);
@@ -2185,7 +2187,7 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.showModal(modal);
   }
 
-  // ── SA: INSERT TIME — goblin individual select → modal ──
+  // ── SA: INSERT TIME — goblin individual select ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("sa_insert_goblin_select_")) {
     const id   = interaction.values[0];
     const boss = SHADOW_BOSSES.find(b => b.id === id);
@@ -2197,13 +2199,12 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.showModal(modal);
   }
 
-  // ── WB: INSERT TIME — server picker → multi-instance picker or direct modal ──
+  // ── WB: INSERT TIME — server picker ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("wb_insert_server_select_")) {
     const key    = interaction.customId.replace("wb_insert_server_select_", "");
     const server = parseInt(interaction.values[0], 10);
 
     if (isMultiInstanceWB(key)) {
-      // Always show instance picker for manual insert
       const instances = getWBInstances(key, server);
       const now = Date.now();
       const cfg = WORLD_BOSS_CONFIG[key];
@@ -2229,7 +2230,6 @@ client.on(Events.InteractionCreate, async interaction => {
       });
     }
 
-    // Single-instance WB (Borgar)
     const id   = `wb_${key}_s${server}`;
     const boss = WORLD_BOSSES.find(b => b.id === id);
     log(interaction.user, `WB Insert: selected ${boss.name}`);
@@ -2240,7 +2240,7 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.showModal(modal);
   }
 
-  // ── WB: INSERT — multi-instance picker → modal ──
+  // ── WB: INSERT — multi-instance picker ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("wb_insert_instance_select_")) {
     const id   = interaction.values[0];
     const boss = WORLD_BOSSES.find(b => b.id === id);
@@ -2308,12 +2308,10 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (isWorld) {
       const bossesInCategory = WORLD_BOSSES.filter(b => b.key === key);
-      const isMulti = isMultiInstanceWB(key);
       const options = [
         ...bossesInCategory.map(b => ({ label: `Reset ${b.name}`, value: b.id })),
         { label: `Reset ALL ${bossesInCategory[0].label}`, value: `RESET_WB_KEY_${key}` },
       ];
-      // For multi-instance: also offer per-server reset
       const specificMenu = new StringSelectMenuBuilder()
         .setCustomId("sa_reset_select")
         .setPlaceholder("Select specific boss to reset")
@@ -2375,7 +2373,6 @@ client.on(Events.InteractionCreate, async interaction => {
       return interaction.deferUpdate();
     }
 
-    // Single boss reset — figure out SA vs WB by ID prefix
     if (value.startsWith("wb_")) {
       const boss = WORLD_BOSSES.find(b => b.id === value);
       clearWBBossCards(value);
