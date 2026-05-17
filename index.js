@@ -866,38 +866,46 @@ function buildWBMissedWindowComponents(id) {
 // =====================
 // DASHBOARD HELPERS — slot renderers
 // =====================
+
+// Returns { text, isMissed } so callers can decide on formatting
 function renderGoblinSlot(b) {
   const now      = Date.now();
   const e        = data.kills[b.id];
   const advCount = missedCount[b.id] || 0;
   const locked   = advCount >= SA_MAX_AUTO_ADVANCE;
-  if (!e) return `#${b.index} 🟢`;
+  if (!e) return { text: `#${b.index} 🟢`, isMissed: false };
   const cooldown   = e.respawnTime - now;
   const windowEnd  = e.respawnTime + SA_GOBLIN_WINDOW_MS;
   const windowLeft = windowEnd - now;
   if (cooldown > 0) {
     const isMissed = !!missedWindowMessages[b.id];
-    const missStr  = isMissed ? ` ⚠️${advCount}/${SA_MAX_AUTO_ADVANCE}${locked ? "🔒" : ""}` : "";
-    return `#${b.index} 🔴 ${format(cooldown)}${missStr}`;
+    if (isMissed) {
+      const respawnStr = toServerTimeStr(e.respawnTime);
+      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}${locked ? "🔒" : ""}`, isMissed: true };
+    }
+    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false };
   }
-  if (windowLeft > 0) return `#${b.index} 🟢 ${format(windowLeft)}`;
-  if (locked) return `#${b.index} 🔒`;
-  return `#${b.index} ⚠️(${advCount})`;
+  if (windowLeft > 0) return { text: `#${b.index} 🟢 ${format(windowLeft)}`, isMissed: false };
+  if (locked) return { text: `#${b.index} 🔒`, isMissed: true };
+  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true };
 }
 
 function renderSAFixedSlot(b) {
   const now      = Date.now();
   const e        = data.kills[b.id];
   const advCount = missedCount[b.id] || 0;
-  if (!e) return `#${b.index} 🟢`;
+  if (!e) return { text: `#${b.index} 🟢`, isMissed: false };
   const cooldown = e.respawnTime - now;
   if (cooldown > 0) {
     const isMissed = !!missedWindowMessages[b.id];
-    if (isMissed) return `#${b.index} ⚠️ ${format(cooldown)}(${advCount}m)`;
-    return `#${b.index} 🔴 ${format(cooldown)}`;
+    if (isMissed) {
+      const respawnStr = toServerTimeStr(e.respawnTime);
+      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`, isMissed: true };
+    }
+    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false };
   }
-  if (cooldown >= -5 * 60 * 1000) return `#${b.index} 🟡 SPAWNED`;
-  return `#${b.index} ⚠️(${advCount})`;
+  if (cooldown >= -5 * 60 * 1000) return { text: `#${b.index} 🟡 SPAWNED`, isMissed: false };
+  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true };
 }
 
 function renderWBMultiSlot(b) {
@@ -906,26 +914,32 @@ function renderWBMultiSlot(b) {
   const cfg      = getWorldBossConfig(b.id);
   const advCount = missedCount[b.id] || 0;
   const isMissed = !!missedWindowMessages[b.id];
-  if (!e) return `#${b.index} 🟢`;
+  if (!e) return { text: `#${b.index} 🟢`, isMissed: false };
   const cooldown   = e.respawnTime - now;
   const windowEnd  = e.respawnTime + cfg.windowMs;
   const windowLeft = windowEnd - now;
   if (cooldown > 0) {
-    if (isMissed) return `#${b.index} ⚠️ ${format(cooldown)}(${advCount}m)`;
-    return `#${b.index} 🔴 ${format(cooldown)}`;
+    if (isMissed) {
+      const respawnStr = toServerTimeStr(e.respawnTime);
+      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`, isMissed: true };
+    }
+    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false };
   }
-  if (windowLeft > 0) return `#${b.index} 🟢 WIN ${format(windowLeft)}`;
-  if (advCount >= cfg.maxMissed) return `#${b.index} 🚨(${advCount}x)`;
-  return `#${b.index} ⚠️(${advCount}x)`;
+  if (windowLeft > 0) return { text: `#${b.index} 🟢 WIN ${format(windowLeft)}`, isMissed: false };
+  if (advCount >= cfg.maxMissed) return { text: `#${b.index} 🚨 x${advCount}`, isMissed: true };
+  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true };
 }
 
 // =====================
-// SHADOW ABYSS DASHBOARD EMBED  (compact layout)
-// =====================
+// SHADOW ABYSS DASHBOARD EMBED
+//
 // Layout:
-//   Section 1 — 👺 Goblins: 3 inline fields (one per server), all goblin types per server
-//   Section 2 — 👹 SA Bosses: one field per respawn-hour tier, all servers on one line per boss
-//   Section 3 — 🌍 World Bosses: single field, all bosses × servers
+//   Section 1 — 👺 Goblins: 3 inline fields (one per server), all goblin types grouped per server
+//   Section 2 — 👹 SA Bosses: one field per respawn-hour tier (6h / 7h / 12h)
+//   Section 3 — 🌍 World Bosses: single compact field
+//
+// Missed timers show: ⚠️ <countdown> @<respawn time> x<miss count>
+// Separator headers use blank lines only — no zero-width-space divider fields
 // =====================
 function buildShadowEmbed() {
   const now   = Date.now();
@@ -934,31 +948,30 @@ function buildShadowEmbed() {
     .setColor(0x7b00ff)
     .setFooter({ text: "Auto-updates every 15s" });
 
-  // ── Section 1: Goblins — 3 inline columns, one per server ──────────────
-  embed.addFields({ name: "👺 Goblins", value: "\u200B", inline: false });
-
+  // ── Section 1: Goblins ─────────────────────────────────────────────────
+  // Three inline columns, one per server.
+  // Each goblin type is its own line; all instances on one line separated by spaces.
+  // A blank line separates goblin types within each column for readability.
   const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
 
   for (const s of SA_SERVERS) {
     const lines = goblinKeys.map(key => {
       const first     = SHADOW_BOSSES.find(b => b.key === key);
       const instances = getGoblinInstances(key, s);
-      const slots     = instances.map(b => renderGoblinSlot(b)).join(" │ ");
-      return `**${first.label}:** ${slots}`;
+      const slots     = instances.map(b => renderGoblinSlot(b).text).join("  ");
+      return `**${first.label}**\n${slots}`;
     });
     embed.addFields({
-      name:   `S${s}`,
-      value:  lines.join("\n"),
+      name:   `👺 Goblins — S${s}`,
+      value:  lines.join("\n\n"),
       inline: true,
     });
   }
 
-  // ── Section 2: SA Fixed Bosses — grouped by respawn tier ───────────────
-  embed.addFields({ name: "👹 SA Bosses", value: "\u200B", inline: false });
-
+  // ── Section 2: SA Fixed Bosses ─────────────────────────────────────────
+  // Grouped by respawn tier; each tier is one non-inline field.
   const fixedKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
 
-  // Group by respawn hours
   const tierMap = {};
   for (const key of fixedKeys) {
     const first    = SHADOW_BOSSES.find(b => b.key === key);
@@ -975,34 +988,35 @@ function buildShadowEmbed() {
       const serverParts = SA_SERVERS.map(s => {
         if (isMulti) {
           const instances = getSAFixedInstances(key, s);
-          const slots = instances.map(b => renderSAFixedSlot(b)).join(" │ ");
+          const slots = instances.map(b => renderSAFixedSlot(b).text).join("  ");
           return `S${s}: ${slots}`;
         }
         const id       = `sa_${key}_s${s}`;
         const e        = data.kills[id];
         const advCount = missedCount[id] || 0;
+        const isMissed = !!missedWindowMessages[id];
         if (!e) return `S${s}: 🟢`;
         const cooldown = e.respawnTime - now;
         if (cooldown > 0) {
-          const isMissed = !!missedWindowMessages[id];
-          if (isMissed) return `S${s}: ⚠️ ${format(cooldown)}(${advCount}m)`;
+          if (isMissed) {
+            const respawnStr = toServerTimeStr(e.respawnTime);
+            return `S${s}: ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`;
+          }
           return `S${s}: 🔴 ${format(cooldown)}`;
         }
         if (cooldown >= -5 * 60 * 1000) return `S${s}: 🟡 SPAWNED`;
-        return `S${s}: ⚠️(${advCount}x)`;
+        return `S${s}: ⚠️ x${advCount}`;
       });
-      lines.push(`**${first.label}** — ${serverParts.join(" │ ")}`);
+      lines.push(`**${first.label}** — ${serverParts.join("  │  ")}`);
     }
     embed.addFields({
-      name:  `${respawnH}h`,
-      value: lines.join("\n"),
+      name:   `👹 SA Bosses — ${respawnH}h`,
+      value:  lines.join("\n"),
       inline: false,
     });
   }
 
-  // ── Section 3: World Bosses — single compact field ──────────────────────
-  embed.addFields({ name: "🌍 World Bosses", value: "\u200B", inline: false });
-
+  // ── Section 3: World Bosses ────────────────────────────────────────────
   const wbKeys  = [...new Set(WORLD_BOSSES.map(b => b.key))];
   const wbLines = [];
 
@@ -1014,7 +1028,7 @@ function buildShadowEmbed() {
     const serverParts = SA_SERVERS.map(s => {
       if (isMulti) {
         const instances = getWBInstances(key, s);
-        const slots = instances.map(b => renderWBMultiSlot(b)).join(" │ ");
+        const slots = instances.map(b => renderWBMultiSlot(b).text).join("  ");
         return `S${s}: ${slots}`;
       }
       const id        = `wb_${key}_s${s}`;
@@ -1026,19 +1040,22 @@ function buildShadowEmbed() {
       const windowEnd  = e.respawnTime + cfg.windowMs;
       const windowLeft = windowEnd - now;
       if (cooldown > 0) {
-        if (isMissed) return `S${s}: ⚠️ ${format(cooldown)}(${advCount}m)`;
+        if (isMissed) {
+          const respawnStr = toServerTimeStr(e.respawnTime);
+          return `S${s}: ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`;
+        }
         return `S${s}: 🔴 ${format(cooldown)}`;
       }
       if (windowLeft > 0) return `S${s}: 🟢 WIN ${format(windowLeft)}`;
-      if (advCount >= cfg.maxMissed) return `S${s}: 🚨(${advCount}x)`;
-      return `S${s}: ⚠️(${advCount}x)`;
+      if (advCount >= cfg.maxMissed) return `S${s}: 🚨 x${advCount}`;
+      return `S${s}: ⚠️ x${advCount}`;
     });
-    wbLines.push(`**${label}** — ${serverParts.join(" │ ")}`);
+    wbLines.push(`**${label}** — ${serverParts.join("  │  ")}`);
   }
 
   embed.addFields({
-    name:  "\u200B",
-    value: wbLines.join("\n"),
+    name:   "🌍 World Bosses",
+    value:  wbLines.join("\n"),
     inline: false,
   });
 
