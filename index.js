@@ -48,8 +48,10 @@ const TICK_RATE  = 15000;
 const MAX_UNDO   = 10;
 const EVERYONE_WARNING_LIFESPAN_MS = 10 * 60 * 1000;
 const WINDOW_GRACE_MS              = 15 * 60 * 1000;
-// How often to repin the full stack to the bottom of the channel (30 min)
+// Repin interval: repin dashboard stack every 30 minutes
 const REPIN_INTERVAL_MS            = 30 * 60 * 1000;
+// Trigger a repin after this many interactions (keeps dashboard at bottom)
+const REPIN_AFTER_ACTIONS          = 10;
 
 // =====================
 // STATE
@@ -68,6 +70,8 @@ let missedCount      = {};
 let repinInProgress  = false;
 let lastBackupRepost = 0;
 let lastRepinTime    = 0;
+// Counter for interactions since last repin
+let actionsSinceRepin = 0;
 
 const BACKUP_REPOST_COOLDOWN_MS = 60 * 1000;
 const BOT_START_TIME   = Date.now();
@@ -90,6 +94,9 @@ const SA_RESPAWN_H = {
 };
 const SA_GOBLIN_WINDOW_MS = 1 * 60 * 60 * 1000;
 const SA_MAX_AUTO_ADVANCE = 3;
+
+// Window given to users after a fixed SA boss missed spawn (2 hours from alert time)
+const SA_FIXED_MISSED_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 function buildShadowBosses() {
   const list = [];
@@ -390,7 +397,8 @@ function restoreSpawnWarningFlags() {
     }
     if (!isGoblin && windowExpired) {
       const nextWindowStart = e.respawnTime;
-      const nextWindowEnd   = e.respawnTime + 60 * 60 * 1000;
+      // Use 2h window from respawn time for fixed SA bosses
+      const nextWindowEnd   = e.respawnTime + SA_FIXED_MISSED_WINDOW_MS;
       const untilEnd        = nextWindowEnd - now;
       if (untilEnd + WINDOW_GRACE_MS > 0) {
         missedWindowMessages[b.id] = {
@@ -688,6 +696,59 @@ function undo() {
 }
 
 // =====================
+// RESTORE WARNING FLAGS AFTER UNDO
+// Re-calculates which thresholds have already been crossed so the warning
+// system does NOT re-fire alerts for events that already happened.
+// =====================
+function recalcSpawnWarningsAfterUndo() {
+  const now = Date.now();
+
+  for (const b of SHADOW_BOSSES) {
+    const e = data.kills[b.id];
+    if (!e) {
+      spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
+      continue;
+    }
+    const isGoblin  = b.type === "goblin";
+    const cooldown  = e.respawnTime - now;
+    const windowEnd = isGoblin ? e.respawnTime + SA_GOBLIN_WINDOW_MS : e.respawnTime + 5 * 60 * 1000;
+    const windowExpired = now > windowEnd;
+
+    spawnWarnings[b.id] = {
+      // 5-min warning already fired if we're within 5 min of (or past) respawn
+      warned5:       cooldown <= 5 * 60 * 1000,
+      // 20-min warning already fired if window is open and less than 20 min left
+      warned20:      isGoblin && cooldown <= 0 && (windowEnd - now) <= 20 * 60 * 1000,
+      // Window card already created if respawn has passed
+      windowCreated: cooldown <= 0,
+      // Missed handler already ran if window has fully expired
+      missedHandled: windowExpired,
+    };
+  }
+
+  for (const b of WORLD_BOSSES) {
+    const e = data.kills[b.id];
+    if (!e) {
+      spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
+      continue;
+    }
+    const config        = getWorldBossConfig(b.id);
+    const cooldown      = e.respawnTime - now;
+    const windowEnd     = e.respawnTime + config.windowMs;
+    const windowExpired = now > windowEnd;
+
+    spawnWarnings[b.id] = {
+      warned5:       cooldown <= 5 * 60 * 1000,
+      warned20:      cooldown <= 0 && (windowEnd - now) <= 20 * 60 * 1000,
+      windowCreated: cooldown <= 0,
+      missedHandled: windowExpired,
+    };
+  }
+
+  console.log("[Undo] Spawn warning flags recalculated — no spurious re-fires.");
+}
+
+// =====================
 // ANNOUNCE HELPERS
 // =====================
 function stripPings(content) {
@@ -867,7 +928,6 @@ function buildWBMissedWindowComponents(id) {
 // DASHBOARD HELPERS — slot renderers
 // =====================
 
-// Returns { text, isMissed } so callers can decide on formatting
 function renderGoblinSlot(b) {
   const now      = Date.now();
   const e        = data.kills[b.id];
@@ -932,14 +992,6 @@ function renderWBMultiSlot(b) {
 
 // =====================
 // SHADOW ABYSS DASHBOARD EMBED
-//
-// Layout:
-//   Section 1 — 👺 Goblins: 3 inline fields (one per server), all goblin types grouped per server
-//   Section 2 — 👹 SA Bosses: one field per respawn-hour tier (6h / 7h / 12h)
-//   Section 3 — 🌍 World Bosses: single compact field
-//
-// Missed timers show: ⚠️ <countdown> @<respawn time> x<miss count>
-// Separator headers use blank lines only — no zero-width-space divider fields
 // =====================
 function buildShadowEmbed() {
   const now   = Date.now();
@@ -949,9 +1001,6 @@ function buildShadowEmbed() {
     .setFooter({ text: "Auto-updates every 15s" });
 
   // ── Section 1: Goblins ─────────────────────────────────────────────────
-  // Three inline columns, one per server.
-  // Each goblin type is its own line; all instances on one line separated by spaces.
-  // A blank line separates goblin types within each column for readability.
   const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
 
   for (const s of SA_SERVERS) {
@@ -969,7 +1018,6 @@ function buildShadowEmbed() {
   }
 
   // ── Section 2: SA Fixed Bosses ─────────────────────────────────────────
-  // Grouped by respawn tier; each tier is one non-inline field.
   const fixedKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
 
   const tierMap = {};
@@ -1178,9 +1226,26 @@ async function repinDashboard(channel) {
       }).catch(() => null);
     }
 
-    lastRepinTime = now;
+    lastRepinTime     = now;
+    actionsSinceRepin = 0;
     console.log("[Repin] Dashboard stack refreshed.");
   } finally { repinInProgress = false; }
+}
+
+// =====================
+// INTERACTION-TRIGGERED REPIN
+// Call this at the end of any interaction that modifies state.
+// Repins if enough actions have accumulated OR the timer has elapsed.
+// =====================
+async function maybeRepinAfterAction(channel) {
+  actionsSinceRepin++;
+  const now = Date.now();
+  const timerElapsed  = now - lastRepinTime >= REPIN_INTERVAL_MS;
+  const actionsReached = actionsSinceRepin >= REPIN_AFTER_ACTIONS;
+  if ((timerElapsed || actionsReached) && !repinInProgress) {
+    console.log(`[Repin] Triggered by interaction (actions=${actionsSinceRepin}, timerElapsed=${timerElapsed})`);
+    await repinDashboard(channel);
+  }
 }
 
 // =====================
@@ -1264,22 +1329,31 @@ async function handleSAMissedWindowGoblin(boss, id, channel) {
 
 // =====================
 // MISSED WINDOW — Shadow Abyss fixed-respawn types
+// FIX: window is now 2 hours from the moment the alert fires (now),
+//      not 1 hour from the respawn time (which was already in the past).
 // =====================
 async function handleSAMissedWindowFixed(boss, id, channel) {
   const e = data.kills[id];
   if (!e) return;
   const count = (missedCount[id] || 0) + 1;
   missedCount[id] = count;
+  const now = Date.now();
   console.log(`[SA MissedWindow Fixed] ${boss.name} — missed #${count}`);
   logBot(`SA MISSED SPAWN ${boss.name} — no kill logged (miss #${count}) — was due: ${toServerDateTimeStr(e.respawnTime)}`);
-  const nextWindowStart = e.respawnTime;
-  const nextWindowEnd   = e.respawnTime + 60 * 60 * 1000;
+
+  // Give a full SA_FIXED_MISSED_WINDOW_MS (2h) window from NOW so users
+  // always see a meaningful countdown rather than only the leftover time.
+  const nextWindowStart = e.respawnTime;          // still tracks when it originally spawned
+  const nextWindowEnd   = now + SA_FIXED_MISSED_WINDOW_MS; // 2h from alert time
   if (!missedWindowMessages[id]) {
     missedWindowMessages[id] = {
       msg: null, deleteTimer: null,
       nextWindowStart, nextWindowEnd,
       pingedStart: true, pinged1h: false, pinged20min: false, boss, isShadow: true,
     };
+  } else {
+    // Extend existing window end
+    missedWindowMessages[id].nextWindowEnd = nextWindowEnd;
   }
   const tsRespawn = Math.floor(e.respawnTime / 1000);
   postEveryoneWarning(channel, `${id}_sa_fixed_missed_${count}`,
@@ -1348,14 +1422,17 @@ function startLoop() {
       if (!channel) return;
       const now = Date.now();
 
+      // ── Periodic repin ──────────────────────────────────────────────────
       if (now - lastRepinTime >= REPIN_INTERVAL_MS) {
         console.log("[Loop] Periodic repin triggered.");
-        if (!repinInProgress) repinDashboard(channel);
+        if (!repinInProgress) await repinDashboard(channel);
+        // After repin, still run warning checks — do NOT return early
         checkSAWarnings(channel);
         checkWBWarnings(channel);
         return;
       }
 
+      // ── No dashboard yet ────────────────────────────────────────────────
       if (!dashboardMessage) {
         if (!repinInProgress) repinDashboard(channel);
         checkSAWarnings(channel);
@@ -1363,6 +1440,7 @@ function startLoop() {
         return;
       }
 
+      // ── Normal tick: edit dashboard in place ────────────────────────────
       try {
         await dashboardMessage.edit({ embeds: [buildShadowEmbed()], components: buildShadowButtons() });
       } catch (err) {
@@ -1379,6 +1457,7 @@ function startLoop() {
         return;
       }
 
+      // ── Edit active spawn-window cards ───────────────────────────────────
       for (const [id, w] of Object.entries(spawnWindowMessages)) {
         if (!w.msg) continue;
         const isWorld = !!w.isWorld;
@@ -1390,6 +1469,7 @@ function startLoop() {
         } catch (err) { if (err.code === 10008) delete spawnWindowMessages[id]; }
       }
 
+      // ── Edit active missed-window cards ──────────────────────────────────
       for (const [id, w] of Object.entries(missedWindowMessages)) {
         if (!w.msg) continue;
         const isWorld  = !!w.isWorld;
@@ -1621,7 +1701,8 @@ client.once(Events.ClientReady, async () => {
     embeds: [buildShadowEmbed()], components: buildShadowButtons(), flags: MessageFlags.SuppressNotifications
   });
 
-  lastRepinTime = Date.now();
+  lastRepinTime     = Date.now();
+  actionsSinceRepin = 0;
 
   startLoop();
   startBackupLoop();
@@ -1773,6 +1854,7 @@ client.on(Events.InteractionCreate, async interaction => {
     clearSABossCards(id);
     await announceKill(interaction.channel, interaction.user, `killed **[Shadow Abyss] ${boss.name}**`,
       `🕒 Kill: ${toServerDateTimeStr(killTime)} — 🔄 Respawn: ${toServerDateTimeStr(respawnTime)}`);
+    await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
 
@@ -1791,6 +1873,7 @@ client.on(Events.InteractionCreate, async interaction => {
     spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
     await announceKill(interaction.channel, interaction.user, `killed **[Shadow Abyss] ${boss.name}** (window kill)`,
       `🕒 Kill: ${toServerDateTimeStr(now)} — 🔄 Respawn: ${toServerDateTimeStr(respawnTime)}`);
+    await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
 
@@ -1825,6 +1908,7 @@ client.on(Events.InteractionCreate, async interaction => {
     spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
     await announceKill(interaction.channel, interaction.user, `manually set **[Shadow Abyss] ${boss.name}** kill time (from window)`,
       `🕒 Kill: ${toServerDateTimeStr(killTime)} — 🔄 Respawn: ${toServerDateTimeStr(respawnTime)}`);
+    await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
 
@@ -1843,6 +1927,7 @@ client.on(Events.InteractionCreate, async interaction => {
     spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
     await announceKill(interaction.channel, interaction.user, `killed **[Shadow Abyss] ${boss.name}** (missed-window kill)`,
       `🕒 Kill: ${toServerDateTimeStr(now)} — 🔄 Respawn: ${toServerDateTimeStr(respawnTime)}`);
+    await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
 
@@ -1877,6 +1962,7 @@ client.on(Events.InteractionCreate, async interaction => {
     spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
     await announceKill(interaction.channel, interaction.user, `manually set **[Shadow Abyss] ${boss.name}** kill time (from missed-window)`,
       `🕒 Kill: ${toServerDateTimeStr(killTime)} — 🔄 Respawn: ${toServerDateTimeStr(respawnTime)}`);
+    await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
 
@@ -1992,6 +2078,7 @@ client.on(Events.InteractionCreate, async interaction => {
     clearWBBossCards(id);
     await announceKill(interaction.channel, interaction.user, `killed **[World Boss] ${boss.name}**`,
       `🕒 Kill: ${toServerDateTimeStr(killTime)} — 🔄 Respawn: ${toServerDateTimeStr(respawnTime)}`);
+    await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
 
@@ -2010,6 +2097,7 @@ client.on(Events.InteractionCreate, async interaction => {
     spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
     await announceKill(interaction.channel, interaction.user, `killed **[World Boss] ${boss.name}** (window kill)`,
       `🕒 Kill: ${toServerDateTimeStr(now)} — 🔄 Respawn: ${toServerDateTimeStr(respawnTime)}`);
+    await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
 
@@ -2044,6 +2132,7 @@ client.on(Events.InteractionCreate, async interaction => {
     spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
     await announceKill(interaction.channel, interaction.user, `manually set **[World Boss] ${boss.name}** kill time (from window)`,
       `🕒 Kill: ${toServerDateTimeStr(killTime)} — 🔄 Respawn: ${toServerDateTimeStr(respawnTime)}`);
+    await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
 
@@ -2062,6 +2151,7 @@ client.on(Events.InteractionCreate, async interaction => {
     spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
     await announceKill(interaction.channel, interaction.user, `killed **[World Boss] ${boss.name}** (missed-window kill)`,
       `🕒 Kill: ${toServerDateTimeStr(now)} — 🔄 Respawn: ${toServerDateTimeStr(respawnTime)}`);
+    await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
 
@@ -2096,6 +2186,7 @@ client.on(Events.InteractionCreate, async interaction => {
     spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
     await announceKill(interaction.channel, interaction.user, `manually set **[World Boss] ${boss.name}** kill time (from missed-window)`,
       `🕒 Kill: ${toServerDateTimeStr(killTime)} — 🔄 Respawn: ${toServerDateTimeStr(respawnTime)}`);
+    await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
 
@@ -2345,6 +2436,7 @@ client.on(Events.InteractionCreate, async interaction => {
       save();
       log(interaction.user, `RESET ALL TIMERS`);
       await announceAdmin(interaction.channel, interaction.user, "reset **ALL** timers ☠️");
+      await maybeRepinAfterAction(interaction.channel);
       return interaction.deferUpdate();
     }
 
@@ -2400,6 +2492,7 @@ client.on(Events.InteractionCreate, async interaction => {
       const label = targets[0]?.label ?? key;
       log(interaction.user, `SA RESET ALL ${label}`);
       await announceAdmin(interaction.channel, interaction.user, `reset all **[Shadow Abyss] ${label}** timers`);
+      await maybeRepinAfterAction(interaction.channel);
       return interaction.deferUpdate();
     }
 
@@ -2415,6 +2508,7 @@ client.on(Events.InteractionCreate, async interaction => {
       const label = targets[0]?.label ?? key;
       log(interaction.user, `WB RESET ALL ${label}`);
       await announceAdmin(interaction.channel, interaction.user, `reset all **[World Boss] ${label}** timers`);
+      await maybeRepinAfterAction(interaction.channel);
       return interaction.deferUpdate();
     }
 
@@ -2435,6 +2529,7 @@ client.on(Events.InteractionCreate, async interaction => {
       log(interaction.user, `SA RESET timer for ${boss.name}`);
       await announceAdmin(interaction.channel, interaction.user, `reset timer for **[Shadow Abyss] ${boss.name}**`);
     }
+    await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
 
@@ -2442,9 +2537,11 @@ client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isButton() && interaction.customId === "sa_undo") {
     if (undo()) {
       log(interaction.user, `UNDO`);
-      for (const id of Object.keys(spawnWarnings))
-        spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
+      // FIX: recalculate flags based on current timer state instead of
+      // blindly resetting all to false, which caused a flood of re-fired warnings.
+      recalcSpawnWarningsAfterUndo();
       await announceAdmin(interaction.channel, interaction.user, "used **undo**");
+      await maybeRepinAfterAction(interaction.channel);
     }
     return interaction.deferUpdate();
   }
