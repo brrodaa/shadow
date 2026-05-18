@@ -53,6 +53,9 @@ const REPIN_INTERVAL_MS            = 30 * 60 * 1000;
 // Trigger a repin after this many interactions (keeps dashboard at bottom)
 const REPIN_AFTER_ACTIONS          = 10;
 
+// Bosses that should NOT receive @everyone pings (spawn too frequently)
+const NO_EVERYONE_PING_KEYS = new Set(["dreadhorn", "moltragon"]);
+
 // =====================
 // STATE
 // =====================
@@ -380,7 +383,8 @@ function restoreSpawnWarningFlags() {
       const advanceCount = missedCount[b.id] || 0;
       if (advanceCount < SA_MAX_AUTO_ADVANCE) {
         const nextWindowStart = e.respawnTime;
-        const nextWindowEnd   = e.respawnTime + SA_GOBLIN_WINDOW_MS + 60 * 60 * 1000;
+        // Always give a full 2h window from now so the countdown is meaningful
+        const nextWindowEnd   = now + (SA_GOBLIN_WINDOW_MS + 60 * 60 * 1000);
         const untilEnd        = nextWindowEnd - now;
         if (untilEnd + WINDOW_GRACE_MS > 0) {
           missedWindowMessages[b.id] = {
@@ -397,8 +401,8 @@ function restoreSpawnWarningFlags() {
     }
     if (!isGoblin && windowExpired) {
       const nextWindowStart = e.respawnTime;
-      // Use 2h window from respawn time for fixed SA bosses
-      const nextWindowEnd   = e.respawnTime + SA_FIXED_MISSED_WINDOW_MS;
+      // Always give a full SA_FIXED_MISSED_WINDOW_MS window from now
+      const nextWindowEnd   = now + SA_FIXED_MISSED_WINDOW_MS;
       const untilEnd        = nextWindowEnd - now;
       if (untilEnd + WINDOW_GRACE_MS > 0) {
         missedWindowMessages[b.id] = {
@@ -434,7 +438,8 @@ function restoreSpawnWarningFlags() {
       const advanceCount = missedCount[b.id] || 0;
       if (advanceCount < config.maxMissed) {
         const nextWindowStart = e.respawnTime;
-        const nextWindowEnd   = e.respawnTime + config.missedWindowMs;
+        // Always give a full missedWindowMs from now on restore
+        const nextWindowEnd   = now + config.missedWindowMs;
         const untilEnd        = nextWindowEnd - now;
         if (untilEnd + WINDOW_GRACE_MS > 0) {
           missedWindowMessages[b.id] = {
@@ -697,8 +702,6 @@ function undo() {
 
 // =====================
 // RESTORE WARNING FLAGS AFTER UNDO
-// Re-calculates which thresholds have already been crossed so the warning
-// system does NOT re-fire alerts for events that already happened.
 // =====================
 function recalcSpawnWarningsAfterUndo() {
   const now = Date.now();
@@ -715,13 +718,9 @@ function recalcSpawnWarningsAfterUndo() {
     const windowExpired = now > windowEnd;
 
     spawnWarnings[b.id] = {
-      // 5-min warning already fired if we're within 5 min of (or past) respawn
       warned5:       cooldown <= 5 * 60 * 1000,
-      // 20-min warning already fired if window is open and less than 20 min left
       warned20:      isGoblin && cooldown <= 0 && (windowEnd - now) <= 20 * 60 * 1000,
-      // Window card already created if respawn has passed
       windowCreated: cooldown <= 0,
-      // Missed handler already ran if window has fully expired
       missedHandled: windowExpired,
     };
   }
@@ -777,12 +776,21 @@ async function announceAdmin(channel, user, action) {
 
 // =====================
 // @EVERYONE WARNINGS
+// Bosses in NO_EVERYONE_PING_KEYS send a suppressed (no-ping) message instead.
 // =====================
-async function postEveryoneWarning(channel, key, content, lifespanMs = EVERYONE_WARNING_LIFESPAN_MS) {
+async function postEveryoneWarning(channel, key, content, lifespanMs = EVERYONE_WARNING_LIFESPAN_MS, bossKey = null) {
   await clearEveryoneWarning(key);
+
+  // Replace @everyone with a plain mention for frequent-spawn bosses
+  const suppressPing = bossKey && NO_EVERYONE_PING_KEYS.has(bossKey);
+  const sendContent  = suppressPing ? content.replace(/@everyone /g, "") : content;
+  const sendOptions  = suppressPing
+    ? { content: sendContent, flags: MessageFlags.SuppressNotifications }
+    : { content: sendContent };
+
   let msg;
-  try { msg = await channel.send({ content }); }
-  catch (err) { console.error("[Warning] Failed to post @everyone:", err.message ?? err); return; }
+  try { msg = await channel.send(sendOptions); }
+  catch (err) { console.error("[Warning] Failed to post warning:", err.message ?? err); return; }
   scheduleEveryoneWarningCycle(channel, key, content, msg, lifespanMs);
 }
 
@@ -991,16 +999,62 @@ function renderWBMultiSlot(b) {
 }
 
 // =====================
+// DASHBOARD — helpers for single-instance SA fixed & WB bosses
+// =====================
+
+function renderSAFixedSingle(id) {
+  const now      = Date.now();
+  const e        = data.kills[id];
+  const advCount = missedCount[id] || 0;
+  const isMissed = !!missedWindowMessages[id];
+  if (!e) return "🟢";
+  const cooldown = e.respawnTime - now;
+  if (cooldown > 0) {
+    if (isMissed) {
+      return `⚠️ ${format(cooldown)} @${toServerTimeStr(e.respawnTime)} x${advCount}`;
+    }
+    return `🔴 ${format(cooldown)} → ${toServerTimeStr(e.respawnTime)}`;
+  }
+  if (cooldown >= -5 * 60 * 1000) return `🟡 SPAWNED`;
+  return `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)})`;
+}
+
+function renderWBSingle(id) {
+  const now      = Date.now();
+  const e        = data.kills[id];
+  const cfg      = getWorldBossConfig(id);
+  const advCount = missedCount[id] || 0;
+  const isMissed = !!missedWindowMessages[id];
+  if (!e) return "🟢";
+  const cooldown   = e.respawnTime - now;
+  const windowEnd  = e.respawnTime + cfg.windowMs;
+  const windowLeft = windowEnd - now;
+  if (cooldown > 0) {
+    if (isMissed) {
+      return `⚠️ ${format(cooldown)} @${toServerTimeStr(e.respawnTime)} x${advCount}`;
+    }
+    return `🔴 ${format(cooldown)} → ${toServerTimeStr(e.respawnTime)}`;
+  }
+  if (windowLeft > 0) return `🟢 WIN ${format(windowLeft)}`;
+  if (advCount >= cfg.maxMissed) return `🚨 x${advCount} (last kill ${toServerTimeStr(e.killTime)})`;
+  return `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)})`;
+}
+
+// =====================
 // SHADOW ABYSS DASHBOARD EMBED
+// Redesigned: no redundant group headers, respawn times shown inline,
+// expired-window entries include last-kill time for context.
+// Layout: one embed field per server for goblins (inline),
+//         one field per respawn-tier for SA fixed bosses,
+//         one field for world bosses.
 // =====================
 function buildShadowEmbed() {
-  const now   = Date.now();
   const embed = new EmbedBuilder()
     .setTitle("🌑 SHADOW ABYSS TRACKER")
     .setColor(0x7b00ff)
     .setFooter({ text: "Auto-updates every 15s" });
 
-  // ── Section 1: Goblins ─────────────────────────────────────────────────
+  // ── Section 1: Goblins — one inline field per server ──────────────────
   const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
 
   for (const s of SA_SERVERS) {
@@ -1017,7 +1071,10 @@ function buildShadowEmbed() {
     });
   }
 
-  // ── Section 2: SA Fixed Bosses ─────────────────────────────────────────
+  // spacer so next section starts on a new row
+  embed.addFields({ name: "\u200b", value: "\u200b", inline: false });
+
+  // ── Section 2: SA Fixed Bosses — grouped by respawn tier ──────────────
   const fixedKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
 
   const tierMap = {};
@@ -1039,27 +1096,15 @@ function buildShadowEmbed() {
           const slots = instances.map(b => renderSAFixedSlot(b).text).join("  ");
           return `S${s}: ${slots}`;
         }
-        const id       = `sa_${key}_s${s}`;
-        const e        = data.kills[id];
-        const advCount = missedCount[id] || 0;
-        const isMissed = !!missedWindowMessages[id];
-        if (!e) return `S${s}: 🟢`;
-        const cooldown = e.respawnTime - now;
-        if (cooldown > 0) {
-          if (isMissed) {
-            const respawnStr = toServerTimeStr(e.respawnTime);
-            return `S${s}: ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`;
-          }
-          return `S${s}: 🔴 ${format(cooldown)}`;
-        }
-        if (cooldown >= -5 * 60 * 1000) return `S${s}: 🟡 SPAWNED`;
-        return `S${s}: ⚠️ x${advCount}`;
+        const id = `sa_${key}_s${s}`;
+        return `S${s}: ${renderSAFixedSingle(id)}`;
       });
-      lines.push(`**${first.label}** — ${serverParts.join("  │  ")}`);
+      // Each server on its own line for readability
+      lines.push(`**${first.label}** *(${respawnH}h)*\n${serverParts.join("\n")}`);
     }
     embed.addFields({
-      name:   `👹 SA Bosses — ${respawnH}h`,
-      value:  lines.join("\n"),
+      name:   `👹 SA Bosses`,
+      value:  lines.join("\n\n"),
       inline: false,
     });
   }
@@ -1079,31 +1124,16 @@ function buildShadowEmbed() {
         const slots = instances.map(b => renderWBMultiSlot(b).text).join("  ");
         return `S${s}: ${slots}`;
       }
-      const id        = `wb_${key}_s${s}`;
-      const e         = data.kills[id];
-      const advCount  = missedCount[id] || 0;
-      const isMissed  = !!missedWindowMessages[id];
-      if (!e) return `S${s}: 🟢`;
-      const cooldown   = e.respawnTime - now;
-      const windowEnd  = e.respawnTime + cfg.windowMs;
-      const windowLeft = windowEnd - now;
-      if (cooldown > 0) {
-        if (isMissed) {
-          const respawnStr = toServerTimeStr(e.respawnTime);
-          return `S${s}: ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`;
-        }
-        return `S${s}: 🔴 ${format(cooldown)}`;
-      }
-      if (windowLeft > 0) return `S${s}: 🟢 WIN ${format(windowLeft)}`;
-      if (advCount >= cfg.maxMissed) return `S${s}: 🚨 x${advCount}`;
-      return `S${s}: ⚠️ x${advCount}`;
+      const id = `wb_${key}_s${s}`;
+      return `S${s}: ${renderWBSingle(id)}`;
     });
-    wbLines.push(`**${label}** — ${serverParts.join("  │  ")}`);
+    // Each server on its own line for readability
+    wbLines.push(`**${label}** *(${cfg.respawnMs / HOUR}h)*\n${serverParts.join("\n")}`);
   }
 
   embed.addFields({
     name:   "🌍 World Bosses",
-    value:  wbLines.join("\n"),
+    value:  wbLines.join("\n\n"),
     inline: false,
   });
 
@@ -1173,7 +1203,8 @@ function buildShadowButtons() {
 
 // =====================
 // REPIN DASHBOARD
-// Stack order: Log → Dashboard → Active spawn windows → Missed windows
+// Stack order: Log → Dashboard → Missed windows → Active spawn windows
+// (spawn windows have higher priority so they sit closer to the bottom / most recent)
 // =====================
 async function repinDashboard(channel) {
   if (repinInProgress) { console.log("[Repin] Already in progress, skipping."); return; }
@@ -1195,19 +1226,7 @@ async function repinDashboard(channel) {
     if (dashboardMessage) dashboardMessage.delete().catch(() => {});
     dashboardMessage = newDashboard;
 
-    for (const id of Object.keys(spawnWindowMessages)) {
-      const w = spawnWindowMessages[id];
-      if (w.msg) w.msg.delete().catch(() => {});
-      if (w.windowEnd + WINDOW_GRACE_MS > now) {
-        const isWorld = !!WORLD_BOSSES.find(b => b.id === id);
-        w.msg = await channel.send({
-          embeds:     [isWorld ? buildWBSpawnWindowEmbed(w.boss, w.windowStart, w.windowEnd) : buildSASpawnWindowEmbed(w.boss, w.windowStart, w.windowEnd)],
-          components: isWorld ? buildWBSpawnWindowComponents(id) : buildSASpawnWindowComponents(id),
-          flags: MessageFlags.SuppressNotifications
-        }).catch(() => null);
-      } else { delete spawnWindowMessages[id]; }
-    }
-
+    // ── Post missed windows first (lower priority, posted earlier = higher up) ──
     for (const id of Object.keys(missedWindowMessages)) {
       const w = missedWindowMessages[id];
       if (w.nextWindowStart > now) { if (w.msg) { w.msg.delete().catch(() => {}); w.msg = null; } continue; }
@@ -1226,6 +1245,20 @@ async function repinDashboard(channel) {
       }).catch(() => null);
     }
 
+    // ── Post active spawn windows last (highest priority = most recent = bottom) ──
+    for (const id of Object.keys(spawnWindowMessages)) {
+      const w = spawnWindowMessages[id];
+      if (w.msg) w.msg.delete().catch(() => {});
+      if (w.windowEnd + WINDOW_GRACE_MS > now) {
+        const isWorld = !!WORLD_BOSSES.find(b => b.id === id);
+        w.msg = await channel.send({
+          embeds:     [isWorld ? buildWBSpawnWindowEmbed(w.boss, w.windowStart, w.windowEnd) : buildSASpawnWindowEmbed(w.boss, w.windowStart, w.windowEnd)],
+          components: isWorld ? buildWBSpawnWindowComponents(id) : buildSASpawnWindowComponents(id),
+          flags: MessageFlags.SuppressNotifications
+        }).catch(() => null);
+      } else { delete spawnWindowMessages[id]; }
+    }
+
     lastRepinTime     = now;
     actionsSinceRepin = 0;
     console.log("[Repin] Dashboard stack refreshed.");
@@ -1234,8 +1267,6 @@ async function repinDashboard(channel) {
 
 // =====================
 // INTERACTION-TRIGGERED REPIN
-// Call this at the end of any interaction that modifies state.
-// Repins if enough actions have accumulated OR the timer has elapsed.
 // =====================
 async function maybeRepinAfterAction(channel) {
   actionsSinceRepin++;
@@ -1302,8 +1333,10 @@ async function handleSAMissedWindowGoblin(boss, id, channel) {
   logBot(`SA AUTO-ADVANCE ${boss.name} — missed window #${count}/${SA_MAX_AUTO_ADVANCE} — new respawn: ${toServerDateTimeStr(e.respawnTime)}${count >= SA_MAX_AUTO_ADVANCE ? " — 🔒 LOCKED" : ""}`);
   spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
   clearSABossCards(id, false);
+  const now = Date.now();
   const nextWindowStart = e.respawnTime;
-  const nextWindowEnd   = e.respawnTime + SA_GOBLIN_WINDOW_MS + 60 * 60 * 1000;
+  // Always give a full 2h window from now so the countdown is meaningful
+  const nextWindowEnd   = now + (SA_GOBLIN_WINDOW_MS + 60 * 60 * 1000);
   missedWindowMessages[id] = {
     msg: null, deleteTimer: null,
     nextWindowStart, nextWindowEnd,
@@ -1329,8 +1362,7 @@ async function handleSAMissedWindowGoblin(boss, id, channel) {
 
 // =====================
 // MISSED WINDOW — Shadow Abyss fixed-respawn types
-// FIX: window is now 2 hours from the moment the alert fires (now),
-//      not 1 hour from the respawn time (which was already in the past).
+// Window is always SA_FIXED_MISSED_WINDOW_MS (2h) from the moment the alert fires.
 // =====================
 async function handleSAMissedWindowFixed(boss, id, channel) {
   const e = data.kills[id];
@@ -1341,10 +1373,9 @@ async function handleSAMissedWindowFixed(boss, id, channel) {
   console.log(`[SA MissedWindow Fixed] ${boss.name} — missed #${count}`);
   logBot(`SA MISSED SPAWN ${boss.name} — no kill logged (miss #${count}) — was due: ${toServerDateTimeStr(e.respawnTime)}`);
 
-  // Give a full SA_FIXED_MISSED_WINDOW_MS (2h) window from NOW so users
-  // always see a meaningful countdown rather than only the leftover time.
-  const nextWindowStart = e.respawnTime;          // still tracks when it originally spawned
-  const nextWindowEnd   = now + SA_FIXED_MISSED_WINDOW_MS; // 2h from alert time
+  const nextWindowStart = e.respawnTime;
+  // Always give a full 2h window from NOW so users always see a meaningful countdown
+  const nextWindowEnd   = now + SA_FIXED_MISSED_WINDOW_MS;
   if (!missedWindowMessages[id]) {
     missedWindowMessages[id] = {
       msg: null, deleteTimer: null,
@@ -1352,7 +1383,6 @@ async function handleSAMissedWindowFixed(boss, id, channel) {
       pingedStart: true, pinged1h: false, pinged20min: false, boss, isShadow: true,
     };
   } else {
-    // Extend existing window end
     missedWindowMessages[id].nextWindowEnd = nextWindowEnd;
   }
   const tsRespawn = Math.floor(e.respawnTime / 1000);
@@ -1365,6 +1395,7 @@ async function handleSAMissedWindowFixed(boss, id, channel) {
 
 // =====================
 // MISSED WINDOW — World Bosses
+// Window is always missedWindowMs from the moment the alert fires.
 // =====================
 async function handleWBMissedWindow(boss, id, channel) {
   const e = data.kills[id];
@@ -1372,11 +1403,12 @@ async function handleWBMissedWindow(boss, id, channel) {
   const config = getWorldBossConfig(id);
   missedCount[id] = (missedCount[id] || 0) + 1;
   const count = missedCount[id];
+  const now   = Date.now();
 
   if (count > config.maxMissed) {
     console.log(`[WB MissedWindow] ${boss.name} exceeded max missed (${config.maxMissed}), stopping.`);
     const content = `@everyone 🚨 **[World Boss] ${boss.name}** timer is **stale** (${count} misses, max ${config.maxMissed}). Please find and kill the boss, then update the timer manually.`;
-    postEveryoneWarning(channel, `${id}_wb_stale_timer`, content, 30 * 60 * 1000);
+    postEveryoneWarning(channel, `${id}_wb_stale_timer`, content, 30 * 60 * 1000, boss.key);
     return;
   }
 
@@ -1391,7 +1423,8 @@ async function handleWBMissedWindow(boss, id, channel) {
   clearWBBossCards(id, false);
 
   const nextWindowStart = e.respawnTime;
-  const nextWindowEnd   = e.respawnTime + config.missedWindowMs;
+  // Always give a full missedWindowMs from NOW so the countdown is meaningful
+  const nextWindowEnd   = now + config.missedWindowMs;
   missedWindowMessages[id] = {
     msg: null, deleteTimer: null,
     nextWindowStart, nextWindowEnd,
@@ -1406,7 +1439,7 @@ async function handleWBMissedWindow(boss, id, channel) {
       `The timer is likely wrong — please find and kill the boss to reset it.\n` +
       `📍 Next estimated window: ${toServerTimeStr(nextWindowStart)} – ${toServerTimeStr(nextWindowEnd)} (server)\n` +
       `<t:${tsOpen}:t> — <t:${tsClose}:t> (your time)`;
-    postEveryoneWarning(channel, `${id}_wb_stale_timer`, content, 30 * 60 * 1000);
+    postEveryoneWarning(channel, `${id}_wb_stale_timer`, content, 30 * 60 * 1000, boss.key);
   }
 }
 
@@ -1426,7 +1459,6 @@ function startLoop() {
       if (now - lastRepinTime >= REPIN_INTERVAL_MS) {
         console.log("[Loop] Periodic repin triggered.");
         if (!repinInProgress) await repinDashboard(channel);
-        // After repin, still run warning checks — do NOT return early
         checkSAWarnings(channel);
         checkWBWarnings(channel);
         return;
@@ -1517,22 +1549,30 @@ function tickMissedWindowPings(channel, now) {
       const tsClose  = Math.floor(w.nextWindowEnd / 1000);
       const advCount = missedCount[id] || 0;
       const prefix   = isWorld ? "[World Boss]" : "[Shadow Abyss]";
+      const bossKey  = w.boss?.key ?? null;
       postEveryoneWarning(channel, `${id}_missed_start`,
         `@everyone 🔶 **${prefix} ${w.boss.name}** missed window is now open! ` +
         `Closes in **${format(untilEnd)}** — <t:${tsClose}:t>\n` +
         (isWorld
           ? `⚠️ Timer might be incorrect — boss may take longer to respawn.`
-          : `⚠️ Missed: ${advCount}/${SA_MAX_AUTO_ADVANCE} — timer might be incorrect.`));
+          : `⚠️ Missed: ${advCount}/${SA_MAX_AUTO_ADVANCE} — timer might be incorrect.`),
+        EVERYONE_WARNING_LIFESPAN_MS,
+        bossKey
+      );
     }
 
     if (!w.pinged20min && untilEnd > 0 && untilEnd <= 20 * 60 * 1000) {
       w.pinged20min = true;
       const advCount = missedCount[id] || 0;
       const prefix   = isWorld ? "[World Boss]" : "[Shadow Abyss]";
+      const bossKey  = w.boss?.key ?? null;
       postEveryoneWarning(channel, `${id}_missed_20min`,
         isWorld
           ? `@everyone ⚠️ **${prefix} ${w.boss.name}** missed-window: **20 minutes remaining** in the spawn window!`
-          : `@everyone ⚠️ **${prefix} ${w.boss.name}** missed-window: **20 minutes remaining**! (${advCount}/${SA_MAX_AUTO_ADVANCE} missed)`);
+          : `@everyone ⚠️ **${prefix} ${w.boss.name}** missed-window: **20 minutes remaining**! (${advCount}/${SA_MAX_AUTO_ADVANCE} missed)`,
+        EVERYONE_WARNING_LIFESPAN_MS,
+        bossKey
+      );
     }
   }
 }
@@ -1612,7 +1652,10 @@ function checkWBWarnings(channel) {
       w.warned5 = true;
       if (!missedWindowMessages[b.id]) {
         postEveryoneWarning(channel, `${b.id}_5min`,
-          `@everyone ⏳ **[World Boss] ${b.name}** spawns in 5 minutes`, Math.max(cooldown, 0));
+          `@everyone ⏳ **[World Boss] ${b.name}** spawns in 5 minutes`,
+          Math.max(cooldown, 0),
+          b.key
+        );
       }
     }
     if (cooldown <= 0 && windowLeft > 0 && !w.windowCreated) {
@@ -1623,7 +1666,10 @@ function checkWBWarnings(channel) {
     if (cooldown <= 0 && windowLeft > 0 && windowLeft <= 20 * 60 * 1000 && !w.warned20) {
       w.warned20 = true;
       postEveryoneWarning(channel, `${b.id}_20min`,
-        `@everyone ⚠️ **[World Boss] ${b.name}** spawn window closes in 20 minutes!`);
+        `@everyone ⚠️ **[World Boss] ${b.name}** spawn window closes in 20 minutes!`,
+        EVERYONE_WARNING_LIFESPAN_MS,
+        b.key
+      );
     }
     if (timeSinceWindowExpired >= 10 * 60 * 1000 && !w.missedHandled) {
       w.missedHandled = true;
@@ -2537,8 +2583,6 @@ client.on(Events.InteractionCreate, async interaction => {
   if (interaction.isButton() && interaction.customId === "sa_undo") {
     if (undo()) {
       log(interaction.user, `UNDO`);
-      // FIX: recalculate flags based on current timer state instead of
-      // blindly resetting all to false, which caused a flood of re-fired warnings.
       recalcSpawnWarningsAfterUndo();
       await announceAdmin(interaction.channel, interaction.user, "used **undo**");
       await maybeRepinAfterAction(interaction.channel);
