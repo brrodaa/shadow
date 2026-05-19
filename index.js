@@ -1041,12 +1041,12 @@ function renderWBSingle(id) {
 }
 
 // =====================
-// SHADOW ABYSS DASHBOARD EMBED
-// Redesigned: no redundant group headers, respawn times shown inline,
-// expired-window entries include last-kill time for context.
-// Layout: one embed field per server for goblins (inline),
-//         one field per respawn-tier for SA fixed bosses,
-//         one field for world bosses.
+// DASHBOARD EMBED
+// Layout:
+//   - Goblins:    3 inline fields (S1 | S2 | S3), each listing all goblin types for that server
+//   - SA Bosses:  grouped by respawn tier; 3 inline fields (S1 | S2 | S3), each listing all
+//                 bosses of that tier for that server — one compact row per tier
+//   - World Bosses: 3 inline fields (S1 | S2 | S3), each listing all WBs for that server
 // =====================
 function buildShadowEmbed() {
   const embed = new EmbedBuilder()
@@ -1054,7 +1054,7 @@ function buildShadowEmbed() {
     .setColor(0x7b00ff)
     .setFooter({ text: "Auto-updates every 15s" });
 
-  // ── Section 1: Goblins — one inline field per server ──────────────────
+  // ── Section 1: Goblins — 3 inline fields (S1, S2, S3) ──────────────────
   const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
 
   for (const s of SA_SERVERS) {
@@ -1074,9 +1074,9 @@ function buildShadowEmbed() {
   // spacer so next section starts on a new row
   embed.addFields({ name: "\u200b", value: "\u200b", inline: false });
 
-  // ── Section 2: SA Fixed Bosses — grouped by respawn tier ──────────────
+  // ── Section 2: SA Fixed + World Bosses — grouped by tier, 3 columns (S1|S2|S3) ──
+  // Build tier map for SA fixed bosses
   const fixedKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
-
   const tierMap = {};
   for (const key of fixedKeys) {
     const first    = SHADOW_BOSSES.find(b => b.key === key);
@@ -1085,57 +1085,54 @@ function buildShadowEmbed() {
     tierMap[respawnH].push(key);
   }
 
+  // One row of 3 fields per SA tier
   for (const [respawnH, keys] of Object.entries(tierMap).sort((a, b) => Number(a[0]) - Number(b[0]))) {
-    const lines = [];
-    for (const key of keys) {
-      const first   = SHADOW_BOSSES.find(b => b.key === key);
-      const isMulti = isMultiInstanceSAFixed(key);
-      const serverParts = SA_SERVERS.map(s => {
+    for (const s of SA_SERVERS) {
+      const lines = keys.map(key => {
+        const first   = SHADOW_BOSSES.find(b => b.key === key);
+        const isMulti = isMultiInstanceSAFixed(key);
+        let status;
         if (isMulti) {
           const instances = getSAFixedInstances(key, s);
-          const slots = instances.map(b => renderSAFixedSlot(b).text).join("  ");
-          return `S${s}: ${slots}`;
+          status = instances.map(b => renderSAFixedSlot(b).text).join("  ");
+        } else {
+          const id = `sa_${key}_s${s}`;
+          status = renderSAFixedSingle(id);
         }
-        const id = `sa_${key}_s${s}`;
-        return `S${s}: ${renderSAFixedSingle(id)}`;
+        return `**${first.label}**\n${status}`;
       });
-      // Each server on its own line for readability
-      lines.push(`**${first.label}** *(${respawnH}h)*\n${serverParts.join("\n")}`);
+      embed.addFields({
+        name:   `👹 SA Bosses *(${respawnH}h)* — S${s}`,
+        value:  lines.join("\n\n"),
+        inline: true,
+      });
     }
-    embed.addFields({
-      name:   `👹 SA Bosses`,
-      value:  lines.join("\n\n"),
-      inline: false,
-    });
+    embed.addFields({ name: "\u200b", value: "\u200b", inline: false });
   }
 
-  // ── Section 3: World Bosses ────────────────────────────────────────────
-  const wbKeys  = [...new Set(WORLD_BOSSES.map(b => b.key))];
-  const wbLines = [];
-
-  for (const key of wbKeys) {
-    const cfg     = WORLD_BOSS_CONFIG[key];
-    const isMulti = isMultiInstanceWB(key);
-    const label   = WORLD_BOSSES.find(b => b.key === key).label;
-
-    const serverParts = SA_SERVERS.map(s => {
+  // One row of 3 fields for all World Bosses (S1|S2|S3)
+  const wbKeys = [...new Set(WORLD_BOSSES.map(b => b.key))];
+  for (const s of SA_SERVERS) {
+    const lines = wbKeys.map(key => {
+      const cfg     = WORLD_BOSS_CONFIG[key];
+      const label   = WORLD_BOSSES.find(b => b.key === key).label;
+      const isMulti = isMultiInstanceWB(key);
+      let status;
       if (isMulti) {
         const instances = getWBInstances(key, s);
-        const slots = instances.map(b => renderWBMultiSlot(b).text).join("  ");
-        return `S${s}: ${slots}`;
+        status = instances.map(b => renderWBMultiSlot(b).text).join("  ");
+      } else {
+        const id = `wb_${key}_s${s}`;
+        status = renderWBSingle(id);
       }
-      const id = `wb_${key}_s${s}`;
-      return `S${s}: ${renderWBSingle(id)}`;
+      return `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${status}`;
     });
-    // Each server on its own line for readability
-    wbLines.push(`**${label}** *(${cfg.respawnMs / HOUR}h)*\n${serverParts.join("\n")}`);
+    embed.addFields({
+      name:   `🌍 World Bosses — S${s}`,
+      value:  lines.join("\n\n"),
+      inline: true,
+    });
   }
-
-  embed.addFields({
-    name:   "🌍 World Bosses",
-    value:  wbLines.join("\n\n"),
-    inline: false,
-  });
 
   return embed;
 }
