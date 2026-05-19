@@ -947,11 +947,11 @@ function buildWBMissedWindowComponents(id) {
 }
 
 // =====================
-// DASHBOARD HELPERS — slot renderers
+// DASHBOARD HELPERS — slot renderers (PATCHED)
 //
-// Each renderer returns { text, isMissed, isReady }
-//   isReady = true  → boss has NO kill data (pure green, available slot)
-//             In compact mode these are hidden; only shown in full view.
+// Changes:
+//  1. Missed-window state always shows ⚠️ (even if cooldown is still active or slot was "ready")
+//  2. Every slot with kill data shows the last killer and a Discord local-time timestamp
 // =====================
 
 function renderGoblinSlot(b) {
@@ -959,39 +959,77 @@ function renderGoblinSlot(b) {
   const e        = data.kills[b.id];
   const advCount = missedCount[b.id] || 0;
   const locked   = advCount >= SA_MAX_AUTO_ADVANCE;
-  if (!e) return { text: `#${b.index} 🟢`, isMissed: false, isReady: true };
+  const isMissed = !!missedWindowMessages[b.id];
+
+  if (!e) {
+    // No kill data at all — but if a missed window is somehow active, flag it
+    return isMissed
+      ? { text: `#${b.index} ⚠️ x${advCount}${locked ? "🔒" : ""}`, isMissed: true, isReady: false }
+      : { text: `#${b.index} 🟢`, isMissed: false, isReady: true };
+  }
+
+  const killerTag  = `*(${e.lastKiller})*`;
+  const localTime  = `<t:${Math.floor(e.respawnTime / 1000)}:t>`;
   const cooldown   = e.respawnTime - now;
   const windowEnd  = e.respawnTime + SA_GOBLIN_WINDOW_MS;
   const windowLeft = windowEnd - now;
+
   if (cooldown > 0) {
-    const isMissed = !!missedWindowMessages[b.id];
     if (isMissed) {
-      const respawnStr = toServerTimeStr(e.respawnTime);
-      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}${locked ? "🔒" : ""}`, isMissed: true, isReady: false };
+      return {
+        text: `#${b.index} ⚠️ ${format(cooldown)} → ${localTime} x${advCount}${locked ? "🔒" : ""} ${killerTag}`,
+        isMissed: true, isReady: false,
+      };
     }
-    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false, isReady: false };
+    return {
+      text: `#${b.index} 🔴 ${format(cooldown)} → ${localTime} ${killerTag}`,
+      isMissed: false, isReady: false,
+    };
   }
-  if (windowLeft > 0) return { text: `#${b.index} 🟢 ${format(windowLeft)}`, isMissed: false, isReady: false };
-  if (locked) return { text: `#${b.index} 🔒`, isMissed: true, isReady: false };
-  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true, isReady: false };
+  if (windowLeft > 0) {
+    return {
+      text: `#${b.index} 🟢 ${format(windowLeft)} left ${killerTag}`,
+      isMissed: false, isReady: false,
+    };
+  }
+  if (locked) {
+    return { text: `#${b.index} 🔒 x${advCount} ${killerTag}`, isMissed: true, isReady: false };
+  }
+  return { text: `#${b.index} ⚠️ x${advCount} ${killerTag}`, isMissed: true, isReady: false };
 }
 
 function renderSAFixedSlot(b) {
   const now      = Date.now();
   const e        = data.kills[b.id];
   const advCount = missedCount[b.id] || 0;
-  if (!e) return { text: `#${b.index} 🟢`, isMissed: false, isReady: true };
-  const cooldown = e.respawnTime - now;
-  if (cooldown > 0) {
-    const isMissed = !!missedWindowMessages[b.id];
-    if (isMissed) {
-      const respawnStr = toServerTimeStr(e.respawnTime);
-      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`, isMissed: true, isReady: false };
-    }
-    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false, isReady: false };
+  const isMissed = !!missedWindowMessages[b.id];
+
+  if (!e) {
+    return isMissed
+      ? { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true, isReady: false }
+      : { text: `#${b.index} 🟢`, isMissed: false, isReady: true };
   }
-  if (cooldown >= -5 * 60 * 1000) return { text: `#${b.index} 🟡 SPAWNED`, isMissed: false, isReady: false };
-  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true, isReady: false };
+
+  const killerTag = `*(${e.lastKiller})*`;
+  const localTime = `<t:${Math.floor(e.respawnTime / 1000)}:t>`;
+  const cooldown  = e.respawnTime - now;
+
+  if (cooldown > 0) {
+    if (isMissed) {
+      return {
+        text: `#${b.index} ⚠️ ${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`,
+        isMissed: true, isReady: false,
+      };
+    }
+    return {
+      text: `#${b.index} 🔴 ${format(cooldown)} → ${localTime} ${killerTag}`,
+      isMissed: false, isReady: false,
+    };
+  }
+  if (cooldown >= -5 * 60 * 1000) {
+    return { text: `#${b.index} 🟡 SPAWNED ${killerTag}`, isMissed: false, isReady: false };
+  }
+  return { text: `#${b.index} ⚠️ x${advCount} ${killerTag}`, isMissed: true, isReady: false };
 }
 
 function renderWBMultiSlot(b) {
@@ -1000,42 +1038,74 @@ function renderWBMultiSlot(b) {
   const cfg      = getWorldBossConfig(b.id);
   const advCount = missedCount[b.id] || 0;
   const isMissed = !!missedWindowMessages[b.id];
-  if (!e) return { text: `#${b.index} 🟢`, isMissed: false, isReady: true };
+
+  if (!e) {
+    return isMissed
+      ? { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true, isReady: false }
+      : { text: `#${b.index} 🟢`, isMissed: false, isReady: true };
+  }
+
+  const killerTag  = `*(${e.lastKiller})*`;
+  const localTime  = `<t:${Math.floor(e.respawnTime / 1000)}:t>`;
   const cooldown   = e.respawnTime - now;
   const windowEnd  = e.respawnTime + cfg.windowMs;
   const windowLeft = windowEnd - now;
+
   if (cooldown > 0) {
     if (isMissed) {
-      const respawnStr = toServerTimeStr(e.respawnTime);
-      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`, isMissed: true, isReady: false };
+      return {
+        text: `#${b.index} ⚠️ ${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`,
+        isMissed: true, isReady: false,
+      };
     }
-    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false, isReady: false };
+    return {
+      text: `#${b.index} 🔴 ${format(cooldown)} → ${localTime} ${killerTag}`,
+      isMissed: false, isReady: false,
+    };
   }
-  if (windowLeft > 0) return { text: `#${b.index} 🟢 WIN ${format(windowLeft)}`, isMissed: false, isReady: false };
-  if (advCount >= cfg.maxMissed) return { text: `#${b.index} 🚨 x${advCount}`, isMissed: true, isReady: false };
-  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true, isReady: false };
+  if (windowLeft > 0) {
+    return {
+      text: `#${b.index} 🟢 WIN ${format(windowLeft)} ${killerTag}`,
+      isMissed: false, isReady: false,
+    };
+  }
+  if (advCount >= cfg.maxMissed) {
+    return { text: `#${b.index} 🚨 x${advCount} ${killerTag}`, isMissed: true, isReady: false };
+  }
+  return { text: `#${b.index} ⚠️ x${advCount} ${killerTag}`, isMissed: true, isReady: false };
 }
 
-// =====================
-// DASHBOARD — single-instance SA fixed & WB
-// Returns { text, isReady } for compact filtering
-// =====================
+// ── Single-instance renderers ──────────────────────────────────────────────
 
 function renderSAFixedSingle(id) {
   const now      = Date.now();
   const e        = data.kills[id];
   const advCount = missedCount[id] || 0;
   const isMissed = !!missedWindowMessages[id];
-  if (!e) return { text: "🟢", isReady: true };
-  const cooldown = e.respawnTime - now;
+
+  if (!e) {
+    return isMissed
+      ? { text: `⚠️ x${advCount}`, isReady: false }
+      : { text: "🟢", isReady: true };
+  }
+
+  const killerTag = `*(${e.lastKiller})*`;
+  const localTime = `<t:${Math.floor(e.respawnTime / 1000)}:t>`;
+  const cooldown  = e.respawnTime - now;
+
   if (cooldown > 0) {
     if (isMissed) {
-      return { text: `⚠️ ${format(cooldown)} @${toServerTimeStr(e.respawnTime)} x${advCount}`, isReady: false };
+      return {
+        text: `⚠️ ${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`,
+        isReady: false,
+      };
     }
-    return { text: `🔴 ${format(cooldown)} → ${toServerTimeStr(e.respawnTime)}`, isReady: false };
+    return { text: `🔴 ${format(cooldown)} → ${localTime} ${killerTag}`, isReady: false };
   }
-  if (cooldown >= -5 * 60 * 1000) return { text: `🟡 SPAWNED`, isReady: false };
-  return { text: `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)})`, isReady: false };
+  if (cooldown >= -5 * 60 * 1000) {
+    return { text: `🟡 SPAWNED ${killerTag}`, isReady: false };
+  }
+  return { text: `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)}) ${killerTag}`, isReady: false };
 }
 
 function renderWBSingle(id) {
@@ -1044,19 +1114,35 @@ function renderWBSingle(id) {
   const cfg      = getWorldBossConfig(id);
   const advCount = missedCount[id] || 0;
   const isMissed = !!missedWindowMessages[id];
-  if (!e) return { text: "🟢", isReady: true };
+
+  if (!e) {
+    return isMissed
+      ? { text: `⚠️ x${advCount}`, isReady: false }
+      : { text: "🟢", isReady: true };
+  }
+
+  const killerTag  = `*(${e.lastKiller})*`;
+  const localTime  = `<t:${Math.floor(e.respawnTime / 1000)}:t>`;
   const cooldown   = e.respawnTime - now;
   const windowEnd  = e.respawnTime + cfg.windowMs;
   const windowLeft = windowEnd - now;
+
   if (cooldown > 0) {
     if (isMissed) {
-      return { text: `⚠️ ${format(cooldown)} @${toServerTimeStr(e.respawnTime)} x${advCount}`, isReady: false };
+      return {
+        text: `⚠️ ${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`,
+        isReady: false,
+      };
     }
-    return { text: `🔴 ${format(cooldown)} → ${toServerTimeStr(e.respawnTime)}`, isReady: false };
+    return { text: `🔴 ${format(cooldown)} → ${localTime} ${killerTag}`, isReady: false };
   }
-  if (windowLeft > 0) return { text: `🟢 WIN ${format(windowLeft)}`, isReady: false };
-  if (advCount >= cfg.maxMissed) return { text: `🚨 x${advCount} (last kill ${toServerTimeStr(e.killTime)})`, isReady: false };
-  return { text: `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)})`, isReady: false };
+  if (windowLeft > 0) {
+    return { text: `🟢 WIN ${format(windowLeft)} ${killerTag}`, isReady: false };
+  }
+  if (advCount >= cfg.maxMissed) {
+    return { text: `🚨 x${advCount} (last kill ${toServerTimeStr(e.killTime)}) ${killerTag}`, isReady: false };
+  }
+  return { text: `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)}) ${killerTag}`, isReady: false };
 }
 
 // =====================
@@ -1096,7 +1182,6 @@ function wbHasTimerForServer(server) {
 // "Ready" = no kill data at all (pure 🟢 with no timer).
 // =====================
 
-// Returns true if this goblin key has at least one slot that is NOT just a plain ready slot
 function goblinKeyHasActiveSlot(key, server) {
   return getGoblinInstances(key, server).some(b => {
     const rendered = renderGoblinSlot(b);
@@ -1104,13 +1189,11 @@ function goblinKeyHasActiveSlot(key, server) {
   });
 }
 
-// Returns true if any goblin key on this server has an active (non-ready) slot
 function anyGoblinServerHasActiveSlot(server) {
   const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
   return goblinKeys.some(key => goblinKeyHasActiveSlot(key, server));
 }
 
-// Returns true if this SA fixed key has an active (non-ready) slot on this server
 function saFixedKeyHasActiveSlot(key, server) {
   const isMulti = isMultiInstanceSAFixed(key);
   if (isMulti) {
@@ -1119,12 +1202,10 @@ function saFixedKeyHasActiveSlot(key, server) {
   return !renderSAFixedSingle(`sa_${key}_s${server}`).isReady;
 }
 
-// Returns true if any SA fixed key in a tier group has an active slot for this server
 function tierHasActiveSlotForServer(keys, server) {
   return keys.some(key => saFixedKeyHasActiveSlot(key, server));
 }
 
-// Returns true if any WB key has an active (non-ready) slot for this server
 function wbHasActiveSlotForServer(server) {
   return [...new Set(WORLD_BOSSES.map(b => b.key))].some(key => {
     const isMulti = isMultiInstanceWB(key);
@@ -1135,11 +1216,6 @@ function wbHasActiveSlotForServer(server) {
 
 // =====================
 // DASHBOARD EMBED
-//
-// compact (default): only shows bosses/slots that have an ACTIVE timer
-//   — "next available" (🟢 with no kill data) slots are hidden
-//   — sections/servers with only ready slots are omitted entirely
-// full: shows everything including ready slots
 // =====================
 function buildShadowEmbed(full = showFullDashboard) {
   const embed = new EmbedBuilder()
@@ -1166,11 +1242,9 @@ function buildShadowEmbed(full = showFullDashboard) {
         const instances = getGoblinInstances(key, s);
 
         if (full) {
-          // Show all slots
           const slots = instances.map(b => renderGoblinSlot(b).text).join("  ");
           return `**${first.label}**\n${slots}`;
         } else {
-          // Only show slots that are NOT plain-ready
           const activeSlots = instances
             .map(b => renderGoblinSlot(b))
             .filter(r => !r.isReady)
