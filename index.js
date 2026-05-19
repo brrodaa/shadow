@@ -75,6 +75,8 @@ let lastBackupRepost = 0;
 let lastRepinTime    = 0;
 // Counter for interactions since last repin
 let actionsSinceRepin = 0;
+// Whether to show all bosses (full) or only those with active timers (compact)
+let showFullDashboard = false;
 
 const BACKUP_REPOST_COOLDOWN_MS = 60 * 1000;
 const BOT_START_TIME   = Date.now();
@@ -464,19 +466,21 @@ function restoreSpawnWarningFlags() {
 // =====================
 async function recoverFromDiscordBackup() {
   const now = Date.now();
-  const localEmpty =
-    !fs.existsSync("sa_data.json") ||
-    (() => {
-      try {
-        const d = JSON.parse(fs.readFileSync("sa_data.json", "utf8"));
-        return !d.kills || Object.values(d.kills).every(e => e.respawnTime < now - 2 * 60 * 60 * 1000);
-      } catch { return true; }
-    })();
-  if (!localEmpty) {
-    console.log("[Recovery] Local sa_data.json exists and has timers — skipping Discord recovery.");
-    return false;
+
+  // Count how many active timers exist locally (within last 8h window)
+  let localActiveCount = 0;
+  if (fs.existsSync("sa_data.json")) {
+    try {
+      const d = JSON.parse(fs.readFileSync("sa_data.json", "utf8"));
+      if (d.kills) {
+        localActiveCount = Object.values(d.kills)
+          .filter(e => e.respawnTime >= now - 8 * 60 * 60 * 1000).length;
+      }
+    } catch { localActiveCount = 0; }
   }
-  console.log("[Recovery] Scanning Discord for latest backup...");
+
+  console.log(`[Recovery] Local active timers: ${localActiveCount}. Scanning Discord for backup...`);
+
   try {
     const backupCh   = await client.channels.fetch(LOG_CHANNEL_ID);
     const fetched    = await backupCh.messages.fetch({ limit: 100 });
@@ -485,20 +489,38 @@ async function recoverFromDiscordBackup() {
       m.attachments.size > 0 &&
       [...m.attachments.values()].some(a => a.name && a.name.endsWith(".json"))
     );
-    if (!candidates.length) { console.warn("[Recovery] No backup messages found."); return false; }
-    const best       = candidates.sort((a, b) => b.editedTimestamp - a.editedTimestamp)[0];
+    if (!candidates.length) {
+      console.warn("[Recovery] No backup messages found in Discord.");
+      return false;
+    }
+    // Sort by most recently edited or created, whichever is later — handles null editedTimestamp
+    const best = candidates.sort((a, b) =>
+      (b.editedTimestamp ?? b.createdTimestamp) - (a.editedTimestamp ?? a.createdTimestamp)
+    )[0];
     const attachment = [...best.attachments.values()].find(a => a.name.endsWith(".json"));
     const response   = await fetch(attachment.url);
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const json = await response.json();
     if (!json.kills) throw new Error("Backup JSON has no 'kills' field");
+
+    const discordActiveCount = Object.values(json.kills)
+      .filter(e => e.respawnTime >= now - 8 * 60 * 60 * 1000).length;
+
+    console.log(`[Recovery] Discord backup active timers: ${discordActiveCount}.`);
+
+    // Only restore from Discord if it has more active timers than local
+    if (discordActiveCount <= localActiveCount) {
+      console.log("[Recovery] Local data is equal or fresher — skipping Discord restore.");
+      return false;
+    }
+
     const filtered = {};
     for (const [id, entry] of Object.entries(json.kills)) {
       if (entry.respawnTime >= now - 8 * 60 * 60 * 1000) filtered[id] = entry;
     }
     data = { kills: filtered };
     save();
-    console.log(`[Recovery] Restored ${Object.keys(filtered).length} active timer(s).`);
+    console.log(`[Recovery] Restored ${Object.keys(filtered).length} active timer(s) from Discord backup.`);
     return true;
   } catch (err) {
     console.error("[Recovery] Failed:", err);
@@ -1041,41 +1063,84 @@ function renderWBSingle(id) {
 }
 
 // =====================
-// DASHBOARD EMBED
-// Layout:
-//   - Goblins:    3 inline fields (S1 | S2 | S3), each listing all goblin types for that server
-//   - SA Bosses:  grouped by respawn tier; 3 inline fields (S1 | S2 | S3), each listing all
-//                 bosses of that tier for that server — one compact row per tier
-//   - World Bosses: 3 inline fields (S1 | S2 | S3), each listing all WBs for that server
+// DASHBOARD HELPERS — active-timer checks
 // =====================
-function buildShadowEmbed() {
-  const embed = new EmbedBuilder()
-    .setTitle("🌑 SHADOW ABYSS TRACKER")
-    .setColor(0x7b00ff)
-    .setFooter({ text: "Auto-updates every 15s" });
 
-  // ── Section 1: Goblins — 3 inline fields (S1, S2, S3) ──────────────────
+// Returns true if any instance of this goblin key+server has a timer
+function goblinKeyHasTimer(key, server) {
+  return getGoblinInstances(key, server).some(b => !!data.kills[b.id]);
+}
+
+// Returns true if any goblin key across all servers has a timer
+function anyGoblinServerHasTimer(server) {
+  const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
+  return goblinKeys.some(key => goblinKeyHasTimer(key, server));
+}
+
+// Returns true if this SA fixed key has a timer on any instance for this server
+function saFixedKeyHasTimer(key, server) {
+  const isMulti = isMultiInstanceSAFixed(key);
+  if (isMulti) return getSAFixedInstances(key, server).some(b => !!data.kills[b.id]);
+  return !!data.kills[`sa_${key}_s${server}`];
+}
+
+// Returns true if any SA fixed key in a tier group has a timer for this server
+function tierHasTimerForServer(keys, server) {
+  return keys.some(key => saFixedKeyHasTimer(key, server));
+}
+
+// Returns true if any WB key has a timer for this server
+function wbHasTimerForServer(server) {
+  return [...new Set(WORLD_BOSSES.map(b => b.key))].some(key => {
+    const isMulti = isMultiInstanceWB(key);
+    if (isMulti) return getWBInstances(key, server).some(b => !!data.kills[b.id]);
+    return !!data.kills[`wb_${key}_s${server}`];
+  });
+}
+
+// =====================
+// DASHBOARD EMBED
+// compact (default): only shows bosses/servers that have at least one active timer
+// full: shows everything
+// Layout: 3 columns (S1 | S2 | S3) per section row
+// =====================
+function buildShadowEmbed(full = showFullDashboard) {
+  const embed = new EmbedBuilder()
+    .setTitle(full ? "🌑 SHADOW ABYSS TRACKER — Full View" : "🌑 SHADOW ABYSS TRACKER")
+    .setColor(0x7b00ff)
+    .setFooter({ text: `Auto-updates every 15s${full ? " • Full view" : " • Compact view — tap 🔍 to expand"}` });
+
+  // ── Section 1: Goblins ──────────────────────────────────────────────────
   const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
 
-  for (const s of SA_SERVERS) {
-    const lines = goblinKeys.map(key => {
-      const first     = SHADOW_BOSSES.find(b => b.key === key);
-      const instances = getGoblinInstances(key, s);
-      const slots     = instances.map(b => renderGoblinSlot(b).text).join("  ");
-      return `**${first.label}**\n${slots}`;
-    });
-    embed.addFields({
-      name:   `👺 Goblins — S${s}`,
-      value:  lines.join("\n\n"),
-      inline: true,
-    });
+  // Which servers to show
+  const goblinServers = full
+    ? SA_SERVERS
+    : SA_SERVERS.filter(s => anyGoblinServerHasTimer(s));
+
+  if (goblinServers.length > 0) {
+    for (const s of goblinServers) {
+      // In compact, only show goblin types that have at least one timer on this server
+      const visibleKeys = full
+        ? goblinKeys
+        : goblinKeys.filter(key => goblinKeyHasTimer(key, s));
+      if (!visibleKeys.length) continue;
+      const lines = visibleKeys.map(key => {
+        const first     = SHADOW_BOSSES.find(b => b.key === key);
+        const instances = getGoblinInstances(key, s);
+        const slots     = instances.map(b => renderGoblinSlot(b).text).join("  ");
+        return `**${first.label}**\n${slots}`;
+      });
+      embed.addFields({
+        name:   `👺 Goblins — S${s}`,
+        value:  lines.join("\n\n"),
+        inline: true,
+      });
+    }
+    embed.addFields({ name: "\u200b", value: "\u200b", inline: false });
   }
 
-  // spacer so next section starts on a new row
-  embed.addFields({ name: "\u200b", value: "\u200b", inline: false });
-
-  // ── Section 2: SA Fixed + World Bosses — grouped by tier, 3 columns (S1|S2|S3) ──
-  // Build tier map for SA fixed bosses
+  // ── Section 2: SA Fixed Bosses — grouped by respawn tier ────────────────
   const fixedKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
   const tierMap = {};
   for (const key of fixedKeys) {
@@ -1085,10 +1150,20 @@ function buildShadowEmbed() {
     tierMap[respawnH].push(key);
   }
 
-  // One row of 3 fields per SA tier
   for (const [respawnH, keys] of Object.entries(tierMap).sort((a, b) => Number(a[0]) - Number(b[0]))) {
-    for (const s of SA_SERVERS) {
-      const lines = keys.map(key => {
+    // Which servers to show for this tier
+    const tierServers = full
+      ? SA_SERVERS
+      : SA_SERVERS.filter(s => tierHasTimerForServer(keys, s));
+    if (!tierServers.length) continue;
+
+    for (const s of tierServers) {
+      // In compact, only show boss keys that have a timer on this server
+      const visibleKeys = full
+        ? keys
+        : keys.filter(key => saFixedKeyHasTimer(key, s));
+      if (!visibleKeys.length) continue;
+      const lines = visibleKeys.map(key => {
         const first   = SHADOW_BOSSES.find(b => b.key === key);
         const isMulti = isMultiInstanceSAFixed(key);
         let status;
@@ -1096,8 +1171,7 @@ function buildShadowEmbed() {
           const instances = getSAFixedInstances(key, s);
           status = instances.map(b => renderSAFixedSlot(b).text).join("  ");
         } else {
-          const id = `sa_${key}_s${s}`;
-          status = renderSAFixedSingle(id);
+          status = renderSAFixedSingle(`sa_${key}_s${s}`);
         }
         return `**${first.label}**\n${status}`;
       });
@@ -1110,28 +1184,50 @@ function buildShadowEmbed() {
     embed.addFields({ name: "\u200b", value: "\u200b", inline: false });
   }
 
-  // One row of 3 fields for all World Bosses (S1|S2|S3)
+  // ── Section 3: World Bosses ──────────────────────────────────────────────
   const wbKeys = [...new Set(WORLD_BOSSES.map(b => b.key))];
-  for (const s of SA_SERVERS) {
-    const lines = wbKeys.map(key => {
-      const cfg     = WORLD_BOSS_CONFIG[key];
-      const label   = WORLD_BOSSES.find(b => b.key === key).label;
-      const isMulti = isMultiInstanceWB(key);
-      let status;
-      if (isMulti) {
-        const instances = getWBInstances(key, s);
-        status = instances.map(b => renderWBMultiSlot(b).text).join("  ");
-      } else {
-        const id = `wb_${key}_s${s}`;
-        status = renderWBSingle(id);
-      }
-      return `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${status}`;
-    });
-    embed.addFields({
-      name:   `🌍 World Bosses — S${s}`,
-      value:  lines.join("\n\n"),
-      inline: true,
-    });
+  const wbServers = full
+    ? SA_SERVERS
+    : SA_SERVERS.filter(s => wbHasTimerForServer(s));
+
+  if (wbServers.length > 0) {
+    for (const s of wbServers) {
+      // In compact, only show WB keys that have a timer on this server
+      const visibleWBKeys = full
+        ? wbKeys
+        : wbKeys.filter(key => {
+            const isMulti = isMultiInstanceWB(key);
+            if (isMulti) return getWBInstances(key, s).some(b => !!data.kills[b.id]);
+            return !!data.kills[`wb_${key}_s${s}`];
+          });
+      if (!visibleWBKeys.length) continue;
+      const lines = visibleWBKeys.map(key => {
+        const cfg     = WORLD_BOSS_CONFIG[key];
+        const label   = WORLD_BOSSES.find(b => b.key === key).label;
+        const isMulti = isMultiInstanceWB(key);
+        let status;
+        if (isMulti) {
+          const instances = getWBInstances(key, s);
+          status = instances.map(b => renderWBMultiSlot(b).text).join("  ");
+        } else {
+          status = renderWBSingle(`wb_${key}_s${s}`);
+        }
+        return `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${status}`;
+      });
+      embed.addFields({
+        name:   `🌍 World Bosses — S${s}`,
+        value:  lines.join("\n\n"),
+        inline: true,
+      });
+    }
+  }
+
+  // If nothing to show in compact mode
+  if (!full) {
+    const hasAnyField = embed.data.fields && embed.data.fields.some(f => f.name !== "\u200b");
+    if (!hasAnyField) {
+      embed.setDescription("✅ No active timers — all bosses are ready to kill!\n\nTap **🔍 Show All** to see the full list.");
+    }
   }
 
   return embed;
@@ -1192,7 +1288,11 @@ function buildShadowButtons() {
     new ButtonBuilder().setCustomId("sa_insert_time").setLabel("📝 Insert").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("sa_reset").setLabel("🧹 Reset").setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId("sa_undo").setLabel("↩️ Undo").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId("show_logs").setLabel("📜 Logs").setStyle(ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId("show_logs").setLabel("📜 Logs").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId("toggle_full_dashboard")
+      .setLabel(showFullDashboard ? "🔼 Compact" : "🔍 Show All")
+      .setStyle(showFullDashboard ? ButtonStyle.Primary : ButtonStyle.Secondary)
   ));
 
   return rows;
@@ -2574,6 +2674,17 @@ client.on(Events.InteractionCreate, async interaction => {
     }
     await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
+  }
+
+  // ── TOGGLE FULL/COMPACT DASHBOARD ──
+  if (interaction.isButton() && interaction.customId === "toggle_full_dashboard") {
+    showFullDashboard = !showFullDashboard;
+    log(interaction.user, `DASHBOARD VIEW: ${showFullDashboard ? "Full" : "Compact"}`);
+    await interaction.deferUpdate();
+    if (dashboardMessage) {
+      await dashboardMessage.edit({ embeds: [buildShadowEmbed()], components: buildShadowButtons() }).catch(() => {});
+    }
+    return;
   }
 
   // ── SA: UNDO ──
