@@ -385,7 +385,6 @@ function restoreSpawnWarningFlags() {
       const advanceCount = missedCount[b.id] || 0;
       if (advanceCount < SA_MAX_AUTO_ADVANCE) {
         const nextWindowStart = e.respawnTime;
-        // Always give a full 2h window from now so the countdown is meaningful
         const nextWindowEnd   = now + (SA_GOBLIN_WINDOW_MS + 60 * 60 * 1000);
         const untilEnd        = nextWindowEnd - now;
         if (untilEnd + WINDOW_GRACE_MS > 0) {
@@ -403,7 +402,6 @@ function restoreSpawnWarningFlags() {
     }
     if (!isGoblin && windowExpired) {
       const nextWindowStart = e.respawnTime;
-      // Always give a full SA_FIXED_MISSED_WINDOW_MS window from now
       const nextWindowEnd   = now + SA_FIXED_MISSED_WINDOW_MS;
       const untilEnd        = nextWindowEnd - now;
       if (untilEnd + WINDOW_GRACE_MS > 0) {
@@ -440,7 +438,6 @@ function restoreSpawnWarningFlags() {
       const advanceCount = missedCount[b.id] || 0;
       if (advanceCount < config.maxMissed) {
         const nextWindowStart = e.respawnTime;
-        // Always give a full missedWindowMs from now on restore
         const nextWindowEnd   = now + config.missedWindowMs;
         const untilEnd        = nextWindowEnd - now;
         if (untilEnd + WINDOW_GRACE_MS > 0) {
@@ -467,7 +464,6 @@ function restoreSpawnWarningFlags() {
 async function recoverFromDiscordBackup() {
   const now = Date.now();
 
-  // Count how many active timers exist locally (within last 8h window)
   let localActiveCount = 0;
   if (fs.existsSync("sa_data.json")) {
     try {
@@ -493,7 +489,6 @@ async function recoverFromDiscordBackup() {
       console.warn("[Recovery] No backup messages found in Discord.");
       return false;
     }
-    // Sort by most recently edited or created, whichever is later — handles null editedTimestamp
     const best = candidates.sort((a, b) =>
       (b.editedTimestamp ?? b.createdTimestamp) - (a.editedTimestamp ?? a.createdTimestamp)
     )[0];
@@ -508,7 +503,6 @@ async function recoverFromDiscordBackup() {
 
     console.log(`[Recovery] Discord backup active timers: ${discordActiveCount}.`);
 
-    // Only restore from Discord if it has more active timers than local
     if (discordActiveCount <= localActiveCount) {
       console.log("[Recovery] Local data is equal or fresher — skipping Discord restore.");
       return false;
@@ -798,12 +792,10 @@ async function announceAdmin(channel, user, action) {
 
 // =====================
 // @EVERYONE WARNINGS
-// Bosses in NO_EVERYONE_PING_KEYS send a suppressed (no-ping) message instead.
 // =====================
 async function postEveryoneWarning(channel, key, content, lifespanMs = EVERYONE_WARNING_LIFESPAN_MS, bossKey = null) {
   await clearEveryoneWarning(key);
 
-  // Replace @everyone with a plain mention for frequent-spawn bosses
   const suppressPing = bossKey && NO_EVERYONE_PING_KEYS.has(bossKey);
   const sendContent  = suppressPing ? content.replace(/@everyone /g, "") : content;
   const sendOptions  = suppressPing
@@ -956,6 +948,10 @@ function buildWBMissedWindowComponents(id) {
 
 // =====================
 // DASHBOARD HELPERS — slot renderers
+//
+// Each renderer returns { text, isMissed, isReady }
+//   isReady = true  → boss has NO kill data (pure green, available slot)
+//             In compact mode these are hidden; only shown in full view.
 // =====================
 
 function renderGoblinSlot(b) {
@@ -963,7 +959,7 @@ function renderGoblinSlot(b) {
   const e        = data.kills[b.id];
   const advCount = missedCount[b.id] || 0;
   const locked   = advCount >= SA_MAX_AUTO_ADVANCE;
-  if (!e) return { text: `#${b.index} 🟢`, isMissed: false };
+  if (!e) return { text: `#${b.index} 🟢`, isMissed: false, isReady: true };
   const cooldown   = e.respawnTime - now;
   const windowEnd  = e.respawnTime + SA_GOBLIN_WINDOW_MS;
   const windowLeft = windowEnd - now;
@@ -971,31 +967,31 @@ function renderGoblinSlot(b) {
     const isMissed = !!missedWindowMessages[b.id];
     if (isMissed) {
       const respawnStr = toServerTimeStr(e.respawnTime);
-      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}${locked ? "🔒" : ""}`, isMissed: true };
+      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}${locked ? "🔒" : ""}`, isMissed: true, isReady: false };
     }
-    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false };
+    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false, isReady: false };
   }
-  if (windowLeft > 0) return { text: `#${b.index} 🟢 ${format(windowLeft)}`, isMissed: false };
-  if (locked) return { text: `#${b.index} 🔒`, isMissed: true };
-  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true };
+  if (windowLeft > 0) return { text: `#${b.index} 🟢 ${format(windowLeft)}`, isMissed: false, isReady: false };
+  if (locked) return { text: `#${b.index} 🔒`, isMissed: true, isReady: false };
+  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true, isReady: false };
 }
 
 function renderSAFixedSlot(b) {
   const now      = Date.now();
   const e        = data.kills[b.id];
   const advCount = missedCount[b.id] || 0;
-  if (!e) return { text: `#${b.index} 🟢`, isMissed: false };
+  if (!e) return { text: `#${b.index} 🟢`, isMissed: false, isReady: true };
   const cooldown = e.respawnTime - now;
   if (cooldown > 0) {
     const isMissed = !!missedWindowMessages[b.id];
     if (isMissed) {
       const respawnStr = toServerTimeStr(e.respawnTime);
-      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`, isMissed: true };
+      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`, isMissed: true, isReady: false };
     }
-    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false };
+    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false, isReady: false };
   }
-  if (cooldown >= -5 * 60 * 1000) return { text: `#${b.index} 🟡 SPAWNED`, isMissed: false };
-  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true };
+  if (cooldown >= -5 * 60 * 1000) return { text: `#${b.index} 🟡 SPAWNED`, isMissed: false, isReady: false };
+  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true, isReady: false };
 }
 
 function renderWBMultiSlot(b) {
@@ -1004,24 +1000,25 @@ function renderWBMultiSlot(b) {
   const cfg      = getWorldBossConfig(b.id);
   const advCount = missedCount[b.id] || 0;
   const isMissed = !!missedWindowMessages[b.id];
-  if (!e) return { text: `#${b.index} 🟢`, isMissed: false };
+  if (!e) return { text: `#${b.index} 🟢`, isMissed: false, isReady: true };
   const cooldown   = e.respawnTime - now;
   const windowEnd  = e.respawnTime + cfg.windowMs;
   const windowLeft = windowEnd - now;
   if (cooldown > 0) {
     if (isMissed) {
       const respawnStr = toServerTimeStr(e.respawnTime);
-      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`, isMissed: true };
+      return { text: `#${b.index} ⚠️ ${format(cooldown)} @${respawnStr} x${advCount}`, isMissed: true, isReady: false };
     }
-    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false };
+    return { text: `#${b.index} 🔴 ${format(cooldown)}`, isMissed: false, isReady: false };
   }
-  if (windowLeft > 0) return { text: `#${b.index} 🟢 WIN ${format(windowLeft)}`, isMissed: false };
-  if (advCount >= cfg.maxMissed) return { text: `#${b.index} 🚨 x${advCount}`, isMissed: true };
-  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true };
+  if (windowLeft > 0) return { text: `#${b.index} 🟢 WIN ${format(windowLeft)}`, isMissed: false, isReady: false };
+  if (advCount >= cfg.maxMissed) return { text: `#${b.index} 🚨 x${advCount}`, isMissed: true, isReady: false };
+  return { text: `#${b.index} ⚠️ x${advCount}`, isMissed: true, isReady: false };
 }
 
 // =====================
-// DASHBOARD — helpers for single-instance SA fixed & WB bosses
+// DASHBOARD — single-instance SA fixed & WB
+// Returns { text, isReady } for compact filtering
 // =====================
 
 function renderSAFixedSingle(id) {
@@ -1029,16 +1026,16 @@ function renderSAFixedSingle(id) {
   const e        = data.kills[id];
   const advCount = missedCount[id] || 0;
   const isMissed = !!missedWindowMessages[id];
-  if (!e) return "🟢";
+  if (!e) return { text: "🟢", isReady: true };
   const cooldown = e.respawnTime - now;
   if (cooldown > 0) {
     if (isMissed) {
-      return `⚠️ ${format(cooldown)} @${toServerTimeStr(e.respawnTime)} x${advCount}`;
+      return { text: `⚠️ ${format(cooldown)} @${toServerTimeStr(e.respawnTime)} x${advCount}`, isReady: false };
     }
-    return `🔴 ${format(cooldown)} → ${toServerTimeStr(e.respawnTime)}`;
+    return { text: `🔴 ${format(cooldown)} → ${toServerTimeStr(e.respawnTime)}`, isReady: false };
   }
-  if (cooldown >= -5 * 60 * 1000) return `🟡 SPAWNED`;
-  return `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)})`;
+  if (cooldown >= -5 * 60 * 1000) return { text: `🟡 SPAWNED`, isReady: false };
+  return { text: `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)})`, isReady: false };
 }
 
 function renderWBSingle(id) {
@@ -1047,49 +1044,44 @@ function renderWBSingle(id) {
   const cfg      = getWorldBossConfig(id);
   const advCount = missedCount[id] || 0;
   const isMissed = !!missedWindowMessages[id];
-  if (!e) return "🟢";
+  if (!e) return { text: "🟢", isReady: true };
   const cooldown   = e.respawnTime - now;
   const windowEnd  = e.respawnTime + cfg.windowMs;
   const windowLeft = windowEnd - now;
   if (cooldown > 0) {
     if (isMissed) {
-      return `⚠️ ${format(cooldown)} @${toServerTimeStr(e.respawnTime)} x${advCount}`;
+      return { text: `⚠️ ${format(cooldown)} @${toServerTimeStr(e.respawnTime)} x${advCount}`, isReady: false };
     }
-    return `🔴 ${format(cooldown)} → ${toServerTimeStr(e.respawnTime)}`;
+    return { text: `🔴 ${format(cooldown)} → ${toServerTimeStr(e.respawnTime)}`, isReady: false };
   }
-  if (windowLeft > 0) return `🟢 WIN ${format(windowLeft)}`;
-  if (advCount >= cfg.maxMissed) return `🚨 x${advCount} (last kill ${toServerTimeStr(e.killTime)})`;
-  return `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)})`;
+  if (windowLeft > 0) return { text: `🟢 WIN ${format(windowLeft)}`, isReady: false };
+  if (advCount >= cfg.maxMissed) return { text: `🚨 x${advCount} (last kill ${toServerTimeStr(e.killTime)})`, isReady: false };
+  return { text: `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)})`, isReady: false };
 }
 
 // =====================
 // DASHBOARD HELPERS — active-timer checks
 // =====================
 
-// Returns true if any instance of this goblin key+server has a timer
 function goblinKeyHasTimer(key, server) {
   return getGoblinInstances(key, server).some(b => !!data.kills[b.id]);
 }
 
-// Returns true if any goblin key across all servers has a timer
 function anyGoblinServerHasTimer(server) {
   const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
   return goblinKeys.some(key => goblinKeyHasTimer(key, server));
 }
 
-// Returns true if this SA fixed key has a timer on any instance for this server
 function saFixedKeyHasTimer(key, server) {
   const isMulti = isMultiInstanceSAFixed(key);
   if (isMulti) return getSAFixedInstances(key, server).some(b => !!data.kills[b.id]);
   return !!data.kills[`sa_${key}_s${server}`];
 }
 
-// Returns true if any SA fixed key in a tier group has a timer for this server
 function tierHasTimerForServer(keys, server) {
   return keys.some(key => saFixedKeyHasTimer(key, server));
 }
 
-// Returns true if any WB key has a timer for this server
 function wbHasTimerForServer(server) {
   return [...new Set(WORLD_BOSSES.map(b => b.key))].some(key => {
     const isMulti = isMultiInstanceWB(key);
@@ -1099,10 +1091,55 @@ function wbHasTimerForServer(server) {
 }
 
 // =====================
+// ACTIVE-STATE CHECKS
+// Returns true if a slot has a meaningful (non-ready) state to display in compact mode.
+// "Ready" = no kill data at all (pure 🟢 with no timer).
+// =====================
+
+// Returns true if this goblin key has at least one slot that is NOT just a plain ready slot
+function goblinKeyHasActiveSlot(key, server) {
+  return getGoblinInstances(key, server).some(b => {
+    const rendered = renderGoblinSlot(b);
+    return !rendered.isReady;
+  });
+}
+
+// Returns true if any goblin key on this server has an active (non-ready) slot
+function anyGoblinServerHasActiveSlot(server) {
+  const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
+  return goblinKeys.some(key => goblinKeyHasActiveSlot(key, server));
+}
+
+// Returns true if this SA fixed key has an active (non-ready) slot on this server
+function saFixedKeyHasActiveSlot(key, server) {
+  const isMulti = isMultiInstanceSAFixed(key);
+  if (isMulti) {
+    return getSAFixedInstances(key, server).some(b => !renderSAFixedSlot(b).isReady);
+  }
+  return !renderSAFixedSingle(`sa_${key}_s${server}`).isReady;
+}
+
+// Returns true if any SA fixed key in a tier group has an active slot for this server
+function tierHasActiveSlotForServer(keys, server) {
+  return keys.some(key => saFixedKeyHasActiveSlot(key, server));
+}
+
+// Returns true if any WB key has an active (non-ready) slot for this server
+function wbHasActiveSlotForServer(server) {
+  return [...new Set(WORLD_BOSSES.map(b => b.key))].some(key => {
+    const isMulti = isMultiInstanceWB(key);
+    if (isMulti) return getWBInstances(key, server).some(b => !renderWBMultiSlot(b).isReady);
+    return !renderWBSingle(`wb_${key}_s${server}`).isReady;
+  });
+}
+
+// =====================
 // DASHBOARD EMBED
-// compact (default): only shows bosses/servers that have at least one active timer
-// full: shows everything
-// Layout: 3 columns (S1 | S2 | S3) per section row
+//
+// compact (default): only shows bosses/slots that have an ACTIVE timer
+//   — "next available" (🟢 with no kill data) slots are hidden
+//   — sections/servers with only ready slots are omitted entirely
+// full: shows everything including ready slots
 // =====================
 function buildShadowEmbed(full = showFullDashboard) {
   const embed = new EmbedBuilder()
@@ -1113,34 +1150,43 @@ function buildShadowEmbed(full = showFullDashboard) {
   // ── Section 1: Goblins ──────────────────────────────────────────────────
   const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
 
-  // Which servers to show
   const goblinServers = full
     ? SA_SERVERS
-    : SA_SERVERS.filter(s => anyGoblinServerHasTimer(s));
+    : SA_SERVERS.filter(s => anyGoblinServerHasActiveSlot(s));
 
   if (goblinServers.length > 0) {
     for (const s of goblinServers) {
-      // In compact, only show goblin types that have at least one timer on this server
       const visibleKeys = full
         ? goblinKeys
-        : goblinKeys.filter(key => goblinKeyHasTimer(key, s));
+        : goblinKeys.filter(key => goblinKeyHasActiveSlot(key, s));
       if (!visibleKeys.length) continue;
+
       const lines = visibleKeys.map(key => {
         const first     = SHADOW_BOSSES.find(b => b.key === key);
         const instances = getGoblinInstances(key, s);
-        const slots     = instances.map(b => renderGoblinSlot(b).text).join("  ");
-        return `**${first.label}**\n${slots}`;
-      });
-      embed.addFields({
-        name:   `👺 Goblins — S${s}`,
-        value:  lines.join("\n\n"),
-        inline: true,
-      });
+
+        if (full) {
+          // Show all slots
+          const slots = instances.map(b => renderGoblinSlot(b).text).join("  ");
+          return `**${first.label}**\n${slots}`;
+        } else {
+          // Only show slots that are NOT plain-ready
+          const activeSlots = instances
+            .map(b => renderGoblinSlot(b))
+            .filter(r => !r.isReady)
+            .map(r => r.text)
+            .join("  ");
+          return activeSlots ? `**${first.label}**\n${activeSlots}` : null;
+        }
+      }).filter(Boolean);
+
+      if (!lines.length) continue;
+      embed.addFields({ name: `👺 Goblins — S${s}`, value: lines.join("\n\n"), inline: true });
     }
     embed.addFields({ name: "\u200b", value: "\u200b", inline: false });
   }
 
-  // ── Section 2: SA Fixed Bosses — grouped by respawn tier ────────────────
+  // ── Section 2: SA Fixed Bosses ──────────────────────────────────────────
   const fixedKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
   const tierMap = {};
   for (const key of fixedKeys) {
@@ -1151,35 +1197,43 @@ function buildShadowEmbed(full = showFullDashboard) {
   }
 
   for (const [respawnH, keys] of Object.entries(tierMap).sort((a, b) => Number(a[0]) - Number(b[0]))) {
-    // Which servers to show for this tier
     const tierServers = full
       ? SA_SERVERS
-      : SA_SERVERS.filter(s => tierHasTimerForServer(keys, s));
+      : SA_SERVERS.filter(s => tierHasActiveSlotForServer(keys, s));
     if (!tierServers.length) continue;
 
     for (const s of tierServers) {
-      // In compact, only show boss keys that have a timer on this server
       const visibleKeys = full
         ? keys
-        : keys.filter(key => saFixedKeyHasTimer(key, s));
+        : keys.filter(key => saFixedKeyHasActiveSlot(key, s));
       if (!visibleKeys.length) continue;
+
       const lines = visibleKeys.map(key => {
         const first   = SHADOW_BOSSES.find(b => b.key === key);
         const isMulti = isMultiInstanceSAFixed(key);
-        let status;
+
         if (isMulti) {
           const instances = getSAFixedInstances(key, s);
-          status = instances.map(b => renderSAFixedSlot(b).text).join("  ");
+          if (full) {
+            const slots = instances.map(b => renderSAFixedSlot(b).text).join("  ");
+            return `**${first.label}**\n${slots}`;
+          } else {
+            const activeSlots = instances
+              .map(b => renderSAFixedSlot(b))
+              .filter(r => !r.isReady)
+              .map(r => r.text)
+              .join("  ");
+            return activeSlots ? `**${first.label}**\n${activeSlots}` : null;
+          }
         } else {
-          status = renderSAFixedSingle(`sa_${key}_s${s}`);
+          const result = renderSAFixedSingle(`sa_${key}_s${s}`);
+          if (!full && result.isReady) return null;
+          return `**${first.label}**\n${result.text}`;
         }
-        return `**${first.label}**\n${status}`;
-      });
-      embed.addFields({
-        name:   `👹 SA Bosses *(${respawnH}h)* — S${s}`,
-        value:  lines.join("\n\n"),
-        inline: true,
-      });
+      }).filter(Boolean);
+
+      if (!lines.length) continue;
+      embed.addFields({ name: `👹 SA Bosses *(${respawnH}h)* — S${s}`, value: lines.join("\n\n"), inline: true });
     }
     embed.addFields({ name: "\u200b", value: "\u200b", inline: false });
   }
@@ -1188,37 +1242,46 @@ function buildShadowEmbed(full = showFullDashboard) {
   const wbKeys = [...new Set(WORLD_BOSSES.map(b => b.key))];
   const wbServers = full
     ? SA_SERVERS
-    : SA_SERVERS.filter(s => wbHasTimerForServer(s));
+    : SA_SERVERS.filter(s => wbHasActiveSlotForServer(s));
 
   if (wbServers.length > 0) {
     for (const s of wbServers) {
-      // In compact, only show WB keys that have a timer on this server
       const visibleWBKeys = full
         ? wbKeys
         : wbKeys.filter(key => {
             const isMulti = isMultiInstanceWB(key);
-            if (isMulti) return getWBInstances(key, s).some(b => !!data.kills[b.id]);
-            return !!data.kills[`wb_${key}_s${s}`];
+            if (isMulti) return getWBInstances(key, s).some(b => !renderWBMultiSlot(b).isReady);
+            return !renderWBSingle(`wb_${key}_s${s}`).isReady;
           });
       if (!visibleWBKeys.length) continue;
+
       const lines = visibleWBKeys.map(key => {
         const cfg     = WORLD_BOSS_CONFIG[key];
         const label   = WORLD_BOSSES.find(b => b.key === key).label;
         const isMulti = isMultiInstanceWB(key);
-        let status;
+
         if (isMulti) {
           const instances = getWBInstances(key, s);
-          status = instances.map(b => renderWBMultiSlot(b).text).join("  ");
+          if (full) {
+            const slots = instances.map(b => renderWBMultiSlot(b).text).join("  ");
+            return `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${slots}`;
+          } else {
+            const activeSlots = instances
+              .map(b => renderWBMultiSlot(b))
+              .filter(r => !r.isReady)
+              .map(r => r.text)
+              .join("  ");
+            return activeSlots ? `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${activeSlots}` : null;
+          }
         } else {
-          status = renderWBSingle(`wb_${key}_s${s}`);
+          const result = renderWBSingle(`wb_${key}_s${s}`);
+          if (!full && result.isReady) return null;
+          return `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${result.text}`;
         }
-        return `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${status}`;
-      });
-      embed.addFields({
-        name:   `🌍 World Bosses — S${s}`,
-        value:  lines.join("\n\n"),
-        inline: true,
-      });
+      }).filter(Boolean);
+
+      if (!lines.length) continue;
+      embed.addFields({ name: `🌍 World Bosses — S${s}`, value: lines.join("\n\n"), inline: true });
     }
   }
 
@@ -1300,8 +1363,6 @@ function buildShadowButtons() {
 
 // =====================
 // REPIN DASHBOARD
-// Stack order: Log → Dashboard → Missed windows → Active spawn windows
-// (spawn windows have higher priority so they sit closer to the bottom / most recent)
 // =====================
 async function repinDashboard(channel) {
   if (repinInProgress) { console.log("[Repin] Already in progress, skipping."); return; }
@@ -1323,7 +1384,6 @@ async function repinDashboard(channel) {
     if (dashboardMessage) dashboardMessage.delete().catch(() => {});
     dashboardMessage = newDashboard;
 
-    // ── Post missed windows first (lower priority, posted earlier = higher up) ──
     for (const id of Object.keys(missedWindowMessages)) {
       const w = missedWindowMessages[id];
       if (w.nextWindowStart > now) { if (w.msg) { w.msg.delete().catch(() => {}); w.msg = null; } continue; }
@@ -1342,7 +1402,6 @@ async function repinDashboard(channel) {
       }).catch(() => null);
     }
 
-    // ── Post active spawn windows last (highest priority = most recent = bottom) ──
     for (const id of Object.keys(spawnWindowMessages)) {
       const w = spawnWindowMessages[id];
       if (w.msg) w.msg.delete().catch(() => {});
@@ -1368,7 +1427,7 @@ async function repinDashboard(channel) {
 async function maybeRepinAfterAction(channel) {
   actionsSinceRepin++;
   const now = Date.now();
-  const timerElapsed  = now - lastRepinTime >= REPIN_INTERVAL_MS;
+  const timerElapsed   = now - lastRepinTime >= REPIN_INTERVAL_MS;
   const actionsReached = actionsSinceRepin >= REPIN_AFTER_ACTIONS;
   if ((timerElapsed || actionsReached) && !repinInProgress) {
     console.log(`[Repin] Triggered by interaction (actions=${actionsSinceRepin}, timerElapsed=${timerElapsed})`);
@@ -1432,7 +1491,6 @@ async function handleSAMissedWindowGoblin(boss, id, channel) {
   clearSABossCards(id, false);
   const now = Date.now();
   const nextWindowStart = e.respawnTime;
-  // Always give a full 2h window from now so the countdown is meaningful
   const nextWindowEnd   = now + (SA_GOBLIN_WINDOW_MS + 60 * 60 * 1000);
   missedWindowMessages[id] = {
     msg: null, deleteTimer: null,
@@ -1459,7 +1517,6 @@ async function handleSAMissedWindowGoblin(boss, id, channel) {
 
 // =====================
 // MISSED WINDOW — Shadow Abyss fixed-respawn types
-// Window is always SA_FIXED_MISSED_WINDOW_MS (2h) from the moment the alert fires.
 // =====================
 async function handleSAMissedWindowFixed(boss, id, channel) {
   const e = data.kills[id];
@@ -1471,7 +1528,6 @@ async function handleSAMissedWindowFixed(boss, id, channel) {
   logBot(`SA MISSED SPAWN ${boss.name} — no kill logged (miss #${count}) — was due: ${toServerDateTimeStr(e.respawnTime)}`);
 
   const nextWindowStart = e.respawnTime;
-  // Always give a full 2h window from NOW so users always see a meaningful countdown
   const nextWindowEnd   = now + SA_FIXED_MISSED_WINDOW_MS;
   if (!missedWindowMessages[id]) {
     missedWindowMessages[id] = {
@@ -1492,7 +1548,6 @@ async function handleSAMissedWindowFixed(boss, id, channel) {
 
 // =====================
 // MISSED WINDOW — World Bosses
-// Window is always missedWindowMs from the moment the alert fires.
 // =====================
 async function handleWBMissedWindow(boss, id, channel) {
   const e = data.kills[id];
@@ -1520,7 +1575,6 @@ async function handleWBMissedWindow(boss, id, channel) {
   clearWBBossCards(id, false);
 
   const nextWindowStart = e.respawnTime;
-  // Always give a full missedWindowMs from NOW so the countdown is meaningful
   const nextWindowEnd   = now + config.missedWindowMs;
   missedWindowMessages[id] = {
     msg: null, deleteTimer: null,
@@ -1552,7 +1606,6 @@ function startLoop() {
       if (!channel) return;
       const now = Date.now();
 
-      // ── Periodic repin ──────────────────────────────────────────────────
       if (now - lastRepinTime >= REPIN_INTERVAL_MS) {
         console.log("[Loop] Periodic repin triggered.");
         if (!repinInProgress) await repinDashboard(channel);
@@ -1561,7 +1614,6 @@ function startLoop() {
         return;
       }
 
-      // ── No dashboard yet ────────────────────────────────────────────────
       if (!dashboardMessage) {
         if (!repinInProgress) repinDashboard(channel);
         checkSAWarnings(channel);
@@ -1569,7 +1621,6 @@ function startLoop() {
         return;
       }
 
-      // ── Normal tick: edit dashboard in place ────────────────────────────
       try {
         await dashboardMessage.edit({ embeds: [buildShadowEmbed()], components: buildShadowButtons() });
       } catch (err) {
@@ -1586,7 +1637,6 @@ function startLoop() {
         return;
       }
 
-      // ── Edit active spawn-window cards ───────────────────────────────────
       for (const [id, w] of Object.entries(spawnWindowMessages)) {
         if (!w.msg) continue;
         const isWorld = !!w.isWorld;
@@ -1598,7 +1648,6 @@ function startLoop() {
         } catch (err) { if (err.code === 10008) delete spawnWindowMessages[id]; }
       }
 
-      // ── Edit active missed-window cards ──────────────────────────────────
       for (const [id, w] of Object.entries(missedWindowMessages)) {
         if (!w.msg) continue;
         const isWorld  = !!w.isWorld;
