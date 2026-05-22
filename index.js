@@ -2799,16 +2799,13 @@ client.on(Events.InteractionCreate, async interaction => {
     return interaction.deferUpdate();
   }
 
-  // ── TOGGLE FULL/COMPACT DASHBOARD ──
-  if (interaction.isButton() && interaction.customId === "toggle_full_dashboard") {
-    showFullDashboard = !showFullDashboard;
-    log(interaction.user, `DASHBOARD VIEW: ${showFullDashboard ? "Full" : "Compact"}`);
-    await interaction.deferUpdate();
-    if (dashboardMessage) {
-      await dashboardMessage.edit({ embeds: [buildShadowEmbed()], components: buildShadowButtons() }).catch(() => {});
-    }
-    return;
-  }
+// ── SHOW FULL DASHBOARD — ephemeral, only visible to the clicking user ──
+if (interaction.isButton() && interaction.customId === "toggle_full_dashboard") {
+  return interaction.reply({
+    embeds: [buildShadowEmbed(true)],
+    flags: MessageFlags.Ephemeral
+  });
+}
 
   // ── SA: UNDO ──
   if (interaction.isButton() && interaction.customId === "sa_undo") {
