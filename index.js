@@ -2,6 +2,7 @@
 // GLOBAL CRASH HANDLERS
 // =====================
 process.on("uncaughtException", (err) => {
+  if (err?.code === 10062) return; // stale interaction, safe to ignore
   console.error("[UncaughtException]", err.message, err.stack);
 });
 process.on("unhandledRejection", (err) => {
@@ -29,7 +30,7 @@ const {
 const fs = require("fs");
 
 const TOKEN          = process.env.SA_BOT_TOKEN;
-const CHANNEL_ID     = "1504789868834852936";
+const CHANNEL_ID     = "1508367662051491941";
 const LOG_CHANNEL_ID = "1501499727877898311";
 
 if (!TOKEN) {
@@ -48,9 +49,7 @@ const TICK_RATE  = 15000;
 const MAX_UNDO   = 10;
 const EVERYONE_WARNING_LIFESPAN_MS = 10 * 60 * 1000;
 const WINDOW_GRACE_MS              = 15 * 60 * 1000;
-// Repin interval: repin dashboard stack every 30 minutes
 const REPIN_INTERVAL_MS            = 30 * 60 * 1000;
-// Trigger a repin after this many interactions (keeps dashboard at bottom)
 const REPIN_AFTER_ACTIONS          = 10;
 
 // Bosses that should NOT receive @everyone pings (spawn too frequently)
@@ -60,23 +59,20 @@ const NO_EVERYONE_PING_KEYS = new Set(["dreadhorn", "moltragon"]);
 // STATE
 // =====================
 let data = { kills: {} };
-let dashboardMessage  = null;
+let dashboardMessage     = null;
 let spawnWarnings        = {};
 let spawnWindowMessages  = {};
 let missedWindowMessages = {};
 let everyoneWarnings     = {};
-let adminLogs = [];
-let undoStack = [];
-let backupMessage = null;
-let logMessage    = null;
-let missedCount      = {};
-let repinInProgress  = false;
-let lastBackupRepost = 0;
-let lastRepinTime    = 0;
-// Counter for interactions since last repin
-let actionsSinceRepin = 0;
-// Whether to show all bosses (full) or only those with active timers (compact)
-let showFullDashboard = false;
+let adminLogs            = [];
+let undoStack            = [];
+let backupMessage        = null;
+let logMessage           = null;
+let missedCount          = {};
+let repinInProgress      = false;
+let lastBackupRepost     = 0;
+let lastRepinTime        = 0;
+let actionsSinceRepin    = 0;
 
 const BACKUP_REPOST_COOLDOWN_MS = 60 * 1000;
 const BOT_START_TIME   = Date.now();
@@ -97,10 +93,8 @@ const SA_RESPAWN_H = {
   sa_fixed7:   7,
   sa_fixed12: 12,
 };
-const SA_GOBLIN_WINDOW_MS = 1 * 60 * 60 * 1000;
-const SA_MAX_AUTO_ADVANCE = 3;
-
-// Window given to users after a fixed SA boss missed spawn (2 hours from alert time)
+const SA_GOBLIN_WINDOW_MS    = 1 * 60 * 60 * 1000;
+const SA_MAX_AUTO_ADVANCE    = 3;
 const SA_FIXED_MISSED_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 function buildShadowBosses() {
@@ -122,41 +116,14 @@ function buildShadowBosses() {
       if (def.type === "goblin") {
         const qty = GOBLIN_QTY[def.key];
         for (let i = 1; i <= qty; i++) {
-          list.push({
-            id:     `sa_${def.key}_s${s}_${i}`,
-            name:   `${def.label} S${s} #${i}`,
-            label:  def.label,
-            key:    def.key,
-            server: s,
-            index:  i,
-            type:   def.type,
-            qty:    qty,
-          });
+          list.push({ id: `sa_${def.key}_s${s}_${i}`, name: `${def.label} S${s} #${i}`, label: def.label, key: def.key, server: s, index: i, type: def.type, qty });
         }
       } else if (def.qty && def.qty > 1) {
         for (let i = 1; i <= def.qty; i++) {
-          list.push({
-            id:     `sa_${def.key}_s${s}_${i}`,
-            name:   `${def.label} S${s} #${i}`,
-            label:  def.label,
-            key:    def.key,
-            server: s,
-            index:  i,
-            type:   def.type,
-            qty:    def.qty,
-          });
+          list.push({ id: `sa_${def.key}_s${s}_${i}`, name: `${def.label} S${s} #${i}`, label: def.label, key: def.key, server: s, index: i, type: def.type, qty: def.qty });
         }
       } else {
-        list.push({
-          id:     `sa_${def.key}_s${s}`,
-          name:   `${def.label} S${s}`,
-          label:  def.label,
-          key:    def.key,
-          server: s,
-          index:  null,
-          type:   def.type,
-          qty:    1,
-        });
+        list.push({ id: `sa_${def.key}_s${s}`, name: `${def.label} S${s}`, label: def.label, key: def.key, server: s, index: null, type: def.type, qty: 1 });
       }
     }
   }
@@ -170,10 +137,11 @@ const SHADOW_BOSSES = buildShadowBosses();
 // =====================
 const HOUR = 60 * 60 * 1000;
 
+// dreadhorn/moltragon: 5-minute window, no missed window tracking (maxMissed: 0)
 const WORLD_BOSS_CONFIG = {
-  borgar:    { respawnMs: 2 * HOUR, windowMs: HOUR, missedWindowMs: HOUR, maxMissed: 2 },
-  dreadhorn: { respawnMs: 1 * HOUR, windowMs: HOUR, missedWindowMs: HOUR, maxMissed: 2, qty: 2 },
-  moltragon: { respawnMs: 1 * HOUR, windowMs: HOUR, missedWindowMs: HOUR, maxMissed: 2, qty: 2 },
+  borgar:    { respawnMs: 2 * HOUR, windowMs: HOUR,          missedWindowMs: HOUR, maxMissed: 2 },
+  dreadhorn: { respawnMs: 1 * HOUR, windowMs: 5 * 60 * 1000, missedWindowMs: 0,    maxMissed: 0, qty: 2 },
+  moltragon: { respawnMs: 1 * HOUR, windowMs: 5 * 60 * 1000, missedWindowMs: 0,    maxMissed: 0, qty: 2 },
 };
 
 function buildWorldBosses() {
@@ -189,28 +157,10 @@ function buildWorldBosses() {
     for (const s of SA_SERVERS) {
       if (qty > 1) {
         for (let i = 1; i <= qty; i++) {
-          list.push({
-            id:     `wb_${def.key}_s${s}_${i}`,
-            name:   `${def.label} S${s} #${i}`,
-            label:  def.label,
-            key:    def.key,
-            server: s,
-            index:  i,
-            type:   def.key,
-            qty,
-          });
+          list.push({ id: `wb_${def.key}_s${s}_${i}`, name: `${def.label} S${s} #${i}`, label: def.label, key: def.key, server: s, index: i, type: def.key, qty });
         }
       } else {
-        list.push({
-          id:     `wb_${def.key}_s${s}`,
-          name:   `${def.label} S${s}`,
-          label:  def.label,
-          key:    def.key,
-          server: s,
-          index:  null,
-          type:   def.key,
-          qty:    1,
-        });
+        list.push({ id: `wb_${def.key}_s${s}`, name: `${def.label} S${s}`, label: def.label, key: def.key, server: s, index: null, type: def.key, qty: 1 });
       }
     }
   }
@@ -331,8 +281,7 @@ function parseServerTime(h, m) {
 
 function toServerTimeStr(ms) {
   return new Date(ms).toLocaleTimeString("en-GB", {
-    hour: "2-digit", minute: "2-digit",
-    timeZone: SERVER_TZ, hour12: false
+    hour: "2-digit", minute: "2-digit", timeZone: SERVER_TZ, hour12: false
   });
 }
 
@@ -364,6 +313,7 @@ function save() {
 // =====================
 function restoreSpawnWarningFlags() {
   const now = Date.now();
+  let freedCount = 0;
 
   for (const b of SHADOW_BOSSES) {
     const e = data.kills[b.id];
@@ -375,47 +325,19 @@ function restoreSpawnWarningFlags() {
     const isGoblin      = b.type === "goblin";
     const windowEnd     = isGoblin ? e.respawnTime + SA_GOBLIN_WINDOW_MS : e.respawnTime;
     const windowExpired = now > windowEnd;
+    if (windowExpired) {
+      console.log(`[Startup] ${b.name} — window already expired. Last kill: ${toServerDateTimeStr(e.killTime)}, next kill timer was: ${toServerDateTimeStr(e.respawnTime)} — freeing slot`);
+      delete data.kills[b.id];
+      spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
+      freedCount++;
+      continue;
+    }
     spawnWarnings[b.id] = {
       warned5:       cooldown <= 5 * 60 * 1000,
       warned20:      isGoblin && cooldown <= 0 && (windowEnd - now) <= 20 * 60 * 1000,
       windowCreated: isGoblin && cooldown <= 0,
-      missedHandled: windowExpired,
+      missedHandled: false,
     };
-    if (isGoblin && windowExpired) {
-      const advanceCount = missedCount[b.id] || 0;
-      if (advanceCount < SA_MAX_AUTO_ADVANCE) {
-        const nextWindowStart = e.respawnTime;
-        const nextWindowEnd   = now + (SA_GOBLIN_WINDOW_MS + 60 * 60 * 1000);
-        const untilEnd        = nextWindowEnd - now;
-        if (untilEnd + WINDOW_GRACE_MS > 0) {
-          missedWindowMessages[b.id] = {
-            msg: null, deleteTimer: null,
-            nextWindowStart, nextWindowEnd, boss: b,
-            pingedStart: nextWindowStart <= now,
-            pinged1h:    untilEnd <= 60 * 60 * 1000,
-            pinged20min: untilEnd <= 20 * 60 * 1000,
-            isShadow: true,
-          };
-          console.log(`[Startup] Restored SA missed window state for ${b.name}`);
-        }
-      }
-    }
-    if (!isGoblin && windowExpired) {
-      const nextWindowStart = e.respawnTime;
-      const nextWindowEnd   = now + SA_FIXED_MISSED_WINDOW_MS;
-      const untilEnd        = nextWindowEnd - now;
-      if (untilEnd + WINDOW_GRACE_MS > 0) {
-        missedWindowMessages[b.id] = {
-          msg: null, deleteTimer: null,
-          nextWindowStart, nextWindowEnd, boss: b,
-          pingedStart: nextWindowStart <= now,
-          pinged1h:    false,
-          pinged20min: untilEnd <= 20 * 60 * 1000,
-          isShadow: true,
-        };
-        console.log(`[Startup] Restored SA fixed missed window state for ${b.name}`);
-      }
-    }
   }
 
   for (const b of WORLD_BOSSES) {
@@ -428,34 +350,26 @@ function restoreSpawnWarningFlags() {
     const cooldown      = e.respawnTime - now;
     const windowEnd     = e.respawnTime + config.windowMs;
     const windowExpired = now > windowEnd;
+    if (windowExpired && config.maxMissed > 0) {
+      console.log(`[Startup] ${b.name} — window already expired. Last kill: ${toServerDateTimeStr(e.killTime)}, next kill timer was: ${toServerDateTimeStr(e.respawnTime)} — freeing slot`);
+      delete data.kills[b.id];
+      spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
+      freedCount++;
+      continue;
+    }
+    const windowLeft          = windowEnd - now;
+    const windowCurrentlyOpen = cooldown <= 0 && windowLeft > 0;
+
     spawnWarnings[b.id] = {
       warned5:       cooldown <= 5 * 60 * 1000,
       warned20:      cooldown <= 0 && (windowEnd - now) <= 20 * 60 * 1000,
-      windowCreated: cooldown <= 0,
+      windowCreated: windowCurrentlyOpen ? false : cooldown <= 0,
       missedHandled: windowExpired,
     };
-    if (windowExpired) {
-      const advanceCount = missedCount[b.id] || 0;
-      if (advanceCount < config.maxMissed) {
-        const nextWindowStart = e.respawnTime;
-        const nextWindowEnd   = now + config.missedWindowMs;
-        const untilEnd        = nextWindowEnd - now;
-        if (untilEnd + WINDOW_GRACE_MS > 0) {
-          missedWindowMessages[b.id] = {
-            msg: null, deleteTimer: null,
-            nextWindowStart, nextWindowEnd, boss: b,
-            pingedStart: nextWindowStart <= now,
-            pinged1h:    untilEnd <= 60 * 60 * 1000,
-            pinged20min: untilEnd <= 20 * 60 * 1000,
-            isWorld: true,
-          };
-          console.log(`[Startup] Restored world boss missed window state for ${b.name}`);
-        }
-      }
-    }
   }
 
-  console.log("[Startup] Spawn warning flags restored.");
+  if (freedCount > 0) save();
+  console.log(`[Startup] Spawn warning flags restored. ${freedCount} expired slot(s) freed.`);
 }
 
 // =====================
@@ -586,9 +500,7 @@ async function initBackupMessage(backupChannel) {
     console.warn("[Backup] Could not scan for existing backup message:", err.message ?? err);
   }
   backupMessage = await backupChannel.send({
-    embeds: [buildBackupEmbed(null)],
-    files:  [buildBackupFile()],
-    flags:  MessageFlags.SuppressNotifications
+    embeds: [buildBackupEmbed(null)], files: [buildBackupFile()], flags: MessageFlags.SuppressNotifications
   });
   console.log("[Backup] Fresh backup message posted.");
 }
@@ -613,9 +525,7 @@ async function repostBackupToBottom() {
     const logCh = await client.channels.fetch(LOG_CHANNEL_ID);
     if (backupMessage) backupMessage.delete().catch(() => {});
     backupMessage = await logCh.send({
-      embeds: [buildBackupEmbed(Date.now())],
-      files:  [buildBackupFile()],
-      flags:  MessageFlags.SuppressNotifications
+      embeds: [buildBackupEmbed(Date.now())], files: [buildBackupFile()], flags: MessageFlags.SuppressNotifications
     });
     console.log("[Backup] Reposted.");
   } catch (err) {
@@ -649,11 +559,6 @@ function buildLogEmbed() {
     .setDescription(description)
     .setColor(0x7b00ff)
     .setFooter({ text: "Auto-updates on every action" });
-}
-
-async function initLogMessage(channel) {
-  logMessage = await channel.send({ embeds: [buildLogEmbed()], flags: MessageFlags.SuppressNotifications });
-  console.log("[Log] Log message posted.");
 }
 
 async function updateLogMessage() {
@@ -716,9 +621,6 @@ function undo() {
   return true;
 }
 
-// =====================
-// RESTORE WARNING FLAGS AFTER UNDO
-// =====================
 function recalcSpawnWarningsAfterUndo() {
   const now = Date.now();
 
@@ -728,11 +630,10 @@ function recalcSpawnWarningsAfterUndo() {
       spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
       continue;
     }
-    const isGoblin  = b.type === "goblin";
-    const cooldown  = e.respawnTime - now;
-    const windowEnd = isGoblin ? e.respawnTime + SA_GOBLIN_WINDOW_MS : e.respawnTime + 5 * 60 * 1000;
+    const isGoblin      = b.type === "goblin";
+    const cooldown      = e.respawnTime - now;
+    const windowEnd     = isGoblin ? e.respawnTime + SA_GOBLIN_WINDOW_MS : e.respawnTime + 5 * 60 * 1000;
     const windowExpired = now > windowEnd;
-
     spawnWarnings[b.id] = {
       warned5:       cooldown <= 5 * 60 * 1000,
       warned20:      isGoblin && cooldown <= 0 && (windowEnd - now) <= 20 * 60 * 1000,
@@ -751,7 +652,6 @@ function recalcSpawnWarningsAfterUndo() {
     const cooldown      = e.respawnTime - now;
     const windowEnd     = e.respawnTime + config.windowMs;
     const windowExpired = now > windowEnd;
-
     spawnWarnings[b.id] = {
       warned5:       cooldown <= 5 * 60 * 1000,
       warned20:      cooldown <= 0 && (windowEnd - now) <= 20 * 60 * 1000,
@@ -760,7 +660,7 @@ function recalcSpawnWarningsAfterUndo() {
     };
   }
 
-  console.log("[Undo] Spawn warning flags recalculated — no spurious re-fires.");
+  console.log("[Undo] Spawn warning flags recalculated.");
 }
 
 // =====================
@@ -795,13 +695,11 @@ async function announceAdmin(channel, user, action) {
 // =====================
 async function postEveryoneWarning(channel, key, content, lifespanMs = EVERYONE_WARNING_LIFESPAN_MS, bossKey = null) {
   await clearEveryoneWarning(key);
-
   const suppressPing = bossKey && NO_EVERYONE_PING_KEYS.has(bossKey);
   const sendContent  = suppressPing ? content.replace(/@everyone /g, "") : content;
   const sendOptions  = suppressPing
     ? { content: sendContent, flags: MessageFlags.SuppressNotifications }
     : { content: sendContent };
-
   let msg;
   try { msg = await channel.send(sendOptions); }
   catch (err) { console.error("[Warning] Failed to post warning:", err.message ?? err); return; }
@@ -947,11 +845,11 @@ function buildWBMissedWindowComponents(id) {
 }
 
 // =====================
-// DASHBOARD HELPERS — slot renderers (PATCHED)
-//
-// Changes:
-//  1. Missed-window state always shows ⚠️ (even if cooldown is still active or slot was "ready")
-//  2. Every slot with kill data shows the last killer and a Discord local-time timestamp
+// DASHBOARD HELPERS — slot renderers
+// ⏳ = on cooldown (was 🔴)
+// 🟢 = window open / ready
+// 🟡 = just spawned
+// ⚠️ = missed
 // =====================
 
 function renderGoblinSlot(b) {
@@ -962,7 +860,6 @@ function renderGoblinSlot(b) {
   const isMissed = !!missedWindowMessages[b.id];
 
   if (!e) {
-    // No kill data at all — but if a missed window is somehow active, flag it
     return isMissed
       ? { text: `#${b.index} ⚠️ x${advCount}${locked ? "🔒" : ""}`, isMissed: true, isReady: false }
       : { text: `#${b.index} 🟢`, isMissed: false, isReady: true };
@@ -975,26 +872,11 @@ function renderGoblinSlot(b) {
   const windowLeft = windowEnd - now;
 
   if (cooldown > 0) {
-    if (isMissed) {
-      return {
-        text: `#${b.index} ⚠️ ${format(cooldown)} → ${localTime} x${advCount}${locked ? "🔒" : ""} ${killerTag}`,
-        isMissed: true, isReady: false,
-      };
-    }
-    return {
-      text: `#${b.index} 🔴 ${format(cooldown)} → ${localTime} ${killerTag}`,
-      isMissed: false, isReady: false,
-    };
+    if (isMissed) return { text: `#${b.index} ⚠️ ⏳${format(cooldown)} → ${localTime} x${advCount}${locked ? "🔒" : ""} ${killerTag}`, isMissed: true, isReady: false };
+    return { text: `#${b.index} ⏳ ${format(cooldown)} → ${localTime} ${killerTag}`, isMissed: false, isReady: false };
   }
-  if (windowLeft > 0) {
-    return {
-      text: `#${b.index} 🟢 ${format(windowLeft)} left ${killerTag}`,
-      isMissed: false, isReady: false,
-    };
-  }
-  if (locked) {
-    return { text: `#${b.index} 🔒 x${advCount} ${killerTag}`, isMissed: true, isReady: false };
-  }
+  if (windowLeft > 0) return { text: `#${b.index} 🟢 ${format(windowLeft)} left ${killerTag}`, isMissed: false, isReady: false };
+  if (locked) return { text: `#${b.index} 🔒 x${advCount} ${killerTag}`, isMissed: true, isReady: false };
   return { text: `#${b.index} ⚠️ x${advCount} ${killerTag}`, isMissed: true, isReady: false };
 }
 
@@ -1015,20 +897,10 @@ function renderSAFixedSlot(b) {
   const cooldown  = e.respawnTime - now;
 
   if (cooldown > 0) {
-    if (isMissed) {
-      return {
-        text: `#${b.index} ⚠️ ${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`,
-        isMissed: true, isReady: false,
-      };
-    }
-    return {
-      text: `#${b.index} 🔴 ${format(cooldown)} → ${localTime} ${killerTag}`,
-      isMissed: false, isReady: false,
-    };
+    if (isMissed) return { text: `#${b.index} ⚠️ ⏳${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`, isMissed: true, isReady: false };
+    return { text: `#${b.index} ⏳ ${format(cooldown)} → ${localTime} ${killerTag}`, isMissed: false, isReady: false };
   }
-  if (cooldown >= -5 * 60 * 1000) {
-    return { text: `#${b.index} 🟡 SPAWNED ${killerTag}`, isMissed: false, isReady: false };
-  }
+  if (cooldown >= -5 * 60 * 1000) return { text: `#${b.index} 🟡 SPAWNED ${killerTag}`, isMissed: false, isReady: false };
   return { text: `#${b.index} ⚠️ x${advCount} ${killerTag}`, isMissed: true, isReady: false };
 }
 
@@ -1052,30 +924,14 @@ function renderWBMultiSlot(b) {
   const windowLeft = windowEnd - now;
 
   if (cooldown > 0) {
-    if (isMissed) {
-      return {
-        text: `#${b.index} ⚠️ ${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`,
-        isMissed: true, isReady: false,
-      };
-    }
-    return {
-      text: `#${b.index} 🔴 ${format(cooldown)} → ${localTime} ${killerTag}`,
-      isMissed: false, isReady: false,
-    };
+    if (isMissed) return { text: `#${b.index} ⚠️ ⏳${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`, isMissed: true, isReady: false };
+    return { text: `#${b.index} ⏳ ${format(cooldown)} → ${localTime} ${killerTag}`, isMissed: false, isReady: false };
   }
-  if (windowLeft > 0) {
-    return {
-      text: `#${b.index} 🟢 WIN ${format(windowLeft)} ${killerTag}`,
-      isMissed: false, isReady: false,
-    };
-  }
-  if (advCount >= cfg.maxMissed) {
-    return { text: `#${b.index} 🚨 x${advCount} ${killerTag}`, isMissed: true, isReady: false };
-  }
+  if (windowLeft > 0) return { text: `#${b.index} 🟢 WIN ${format(windowLeft)} ${killerTag}`, isMissed: false, isReady: false };
+  if (cfg.maxMissed === 0) return { text: `#${b.index} 🟢`, isMissed: false, isReady: true };
+  if (advCount >= cfg.maxMissed) return { text: `#${b.index} 🚨 x${advCount} ${killerTag}`, isMissed: true, isReady: false };
   return { text: `#${b.index} ⚠️ x${advCount} ${killerTag}`, isMissed: true, isReady: false };
 }
-
-// ── Single-instance renderers ──────────────────────────────────────────────
 
 function renderSAFixedSingle(id) {
   const now      = Date.now();
@@ -1084,9 +940,7 @@ function renderSAFixedSingle(id) {
   const isMissed = !!missedWindowMessages[id];
 
   if (!e) {
-    return isMissed
-      ? { text: `⚠️ x${advCount}`, isReady: false }
-      : { text: "🟢", isReady: true };
+    return isMissed ? { text: `⚠️ x${advCount}`, isReady: false } : { text: "🟢", isReady: true };
   }
 
   const killerTag = `*(${e.lastKiller})*`;
@@ -1094,17 +948,10 @@ function renderSAFixedSingle(id) {
   const cooldown  = e.respawnTime - now;
 
   if (cooldown > 0) {
-    if (isMissed) {
-      return {
-        text: `⚠️ ${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`,
-        isReady: false,
-      };
-    }
-    return { text: `🔴 ${format(cooldown)} → ${localTime} ${killerTag}`, isReady: false };
+    if (isMissed) return { text: `⚠️ ⏳${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`, isReady: false };
+    return { text: `⏳ ${format(cooldown)} → ${localTime} ${killerTag}`, isReady: false };
   }
-  if (cooldown >= -5 * 60 * 1000) {
-    return { text: `🟡 SPAWNED ${killerTag}`, isReady: false };
-  }
+  if (cooldown >= -5 * 60 * 1000) return { text: `🟡 SPAWNED ${killerTag}`, isReady: false };
   return { text: `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)}) ${killerTag}`, isReady: false };
 }
 
@@ -1116,9 +963,7 @@ function renderWBSingle(id) {
   const isMissed = !!missedWindowMessages[id];
 
   if (!e) {
-    return isMissed
-      ? { text: `⚠️ x${advCount}`, isReady: false }
-      : { text: "🟢", isReady: true };
+    return isMissed ? { text: `⚠️ x${advCount}`, isReady: false } : { text: "🟢", isReady: true };
   }
 
   const killerTag  = `*(${e.lastKiller})*`;
@@ -1128,20 +973,12 @@ function renderWBSingle(id) {
   const windowLeft = windowEnd - now;
 
   if (cooldown > 0) {
-    if (isMissed) {
-      return {
-        text: `⚠️ ${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`,
-        isReady: false,
-      };
-    }
-    return { text: `🔴 ${format(cooldown)} → ${localTime} ${killerTag}`, isReady: false };
+    if (isMissed) return { text: `⚠️ ⏳${format(cooldown)} → ${localTime} x${advCount} ${killerTag}`, isReady: false };
+    return { text: `⏳ ${format(cooldown)} → ${localTime} ${killerTag}`, isReady: false };
   }
-  if (windowLeft > 0) {
-    return { text: `🟢 WIN ${format(windowLeft)} ${killerTag}`, isReady: false };
-  }
-  if (advCount >= cfg.maxMissed) {
-    return { text: `🚨 x${advCount} (last kill ${toServerTimeStr(e.killTime)}) ${killerTag}`, isReady: false };
-  }
+  if (windowLeft > 0) return { text: `🟢 WIN ${format(windowLeft)} ${killerTag}`, isReady: false };
+  if (cfg.maxMissed === 0) return { text: "🟢", isReady: true };
+  if (advCount >= cfg.maxMissed) return { text: `🚨 x${advCount} (last kill ${toServerTimeStr(e.killTime)}) ${killerTag}`, isReady: false };
   return { text: `⚠️ x${advCount} (last kill ${toServerTimeStr(e.killTime)}) ${killerTag}`, isReady: false };
 }
 
@@ -1149,44 +986,8 @@ function renderWBSingle(id) {
 // DASHBOARD HELPERS — active-timer checks
 // =====================
 
-function goblinKeyHasTimer(key, server) {
-  return getGoblinInstances(key, server).some(b => !!data.kills[b.id]);
-}
-
-function anyGoblinServerHasTimer(server) {
-  const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
-  return goblinKeys.some(key => goblinKeyHasTimer(key, server));
-}
-
-function saFixedKeyHasTimer(key, server) {
-  const isMulti = isMultiInstanceSAFixed(key);
-  if (isMulti) return getSAFixedInstances(key, server).some(b => !!data.kills[b.id]);
-  return !!data.kills[`sa_${key}_s${server}`];
-}
-
-function tierHasTimerForServer(keys, server) {
-  return keys.some(key => saFixedKeyHasTimer(key, server));
-}
-
-function wbHasTimerForServer(server) {
-  return [...new Set(WORLD_BOSSES.map(b => b.key))].some(key => {
-    const isMulti = isMultiInstanceWB(key);
-    if (isMulti) return getWBInstances(key, server).some(b => !!data.kills[b.id]);
-    return !!data.kills[`wb_${key}_s${server}`];
-  });
-}
-
-// =====================
-// ACTIVE-STATE CHECKS
-// Returns true if a slot has a meaningful (non-ready) state to display in compact mode.
-// "Ready" = no kill data at all (pure 🟢 with no timer).
-// =====================
-
 function goblinKeyHasActiveSlot(key, server) {
-  return getGoblinInstances(key, server).some(b => {
-    const rendered = renderGoblinSlot(b);
-    return !rendered.isReady;
-  });
+  return getGoblinInstances(key, server).some(b => !renderGoblinSlot(b).isReady);
 }
 
 function anyGoblinServerHasActiveSlot(server) {
@@ -1195,10 +996,7 @@ function anyGoblinServerHasActiveSlot(server) {
 }
 
 function saFixedKeyHasActiveSlot(key, server) {
-  const isMulti = isMultiInstanceSAFixed(key);
-  if (isMulti) {
-    return getSAFixedInstances(key, server).some(b => !renderSAFixedSlot(b).isReady);
-  }
+  if (isMultiInstanceSAFixed(key)) return getSAFixedInstances(key, server).some(b => !renderSAFixedSlot(b).isReady);
   return !renderSAFixedSingle(`sa_${key}_s${server}`).isReady;
 }
 
@@ -1208,61 +1006,63 @@ function tierHasActiveSlotForServer(keys, server) {
 
 function wbHasActiveSlotForServer(server) {
   return [...new Set(WORLD_BOSSES.map(b => b.key))].some(key => {
-    const isMulti = isMultiInstanceWB(key);
-    if (isMulti) return getWBInstances(key, server).some(b => !renderWBMultiSlot(b).isReady);
+    if (isMultiInstanceWB(key)) return getWBInstances(key, server).some(b => !renderWBMultiSlot(b).isReady);
     return !renderWBSingle(`wb_${key}_s${server}`).isReady;
   });
 }
 
 // =====================
+// DUPLICATE-KILL GUARD
+// =====================
+function deduplicateKillsById(bossList) {
+  const seen = new Set();
+  const grouped = {};
+  for (const b of bossList) {
+    const groupKey = `${b.key}_s${b.server}`;
+    if (!grouped[groupKey]) grouped[groupKey] = [];
+    grouped[groupKey].push(b);
+  }
+  for (const group of Object.values(grouped)) {
+    for (const b of group) seen.add(b.id);
+  }
+  return seen;
+}
+
+// =====================
 // DASHBOARD EMBED
 // =====================
-function buildShadowEmbed(full = showFullDashboard) {
+function buildShadowEmbed(full = false) {
   const embed = new EmbedBuilder()
     .setTitle(full ? "🌑 SHADOW ABYSS TRACKER — Full View" : "🌑 SHADOW ABYSS TRACKER")
     .setColor(0x7b00ff)
-    .setFooter({ text: `Auto-updates every 15s${full ? " • Full view" : " • Compact view — tap 🔍 to expand"}` });
+    .setFooter({ text: `Auto-updates every 15s${full ? " • Full view" : " • Compact view"}` });
 
-  // ── Section 1: Goblins ──────────────────────────────────────────────────
-  const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
-
-  const goblinServers = full
-    ? SA_SERVERS
-    : SA_SERVERS.filter(s => anyGoblinServerHasActiveSlot(s));
+  // ── Section 1: Goblins ─────────────────────────────────────────────────
+  const goblinKeys    = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
+  const goblinServers = full ? SA_SERVERS : SA_SERVERS.filter(s => anyGoblinServerHasActiveSlot(s));
 
   if (goblinServers.length > 0) {
     for (const s of goblinServers) {
-      const visibleKeys = full
-        ? goblinKeys
-        : goblinKeys.filter(key => goblinKeyHasActiveSlot(key, s));
+      const visibleKeys = full ? goblinKeys : goblinKeys.filter(key => goblinKeyHasActiveSlot(key, s));
       if (!visibleKeys.length) continue;
-
       const lines = visibleKeys.map(key => {
         const first     = SHADOW_BOSSES.find(b => b.key === key);
         const instances = getGoblinInstances(key, s);
-
         if (full) {
-          const slots = instances.map(b => renderGoblinSlot(b).text).join("  ");
-          return `**${first.label}**\n${slots}`;
-        } else {
-          const activeSlots = instances
-            .map(b => renderGoblinSlot(b))
-            .filter(r => !r.isReady)
-            .map(r => r.text)
-            .join("  ");
-          return activeSlots ? `**${first.label}**\n${activeSlots}` : null;
+          return `**${first.label}**\n${instances.map(b => renderGoblinSlot(b).text).join("  ")}`;
         }
+        const activeSlots = instances.map(b => renderGoblinSlot(b)).filter(r => !r.isReady).map(r => r.text).join("  ");
+        return activeSlots ? `**${first.label}**\n${activeSlots}` : null;
       }).filter(Boolean);
-
       if (!lines.length) continue;
       embed.addFields({ name: `👺 Goblins — S${s}`, value: lines.join("\n\n"), inline: true });
     }
     embed.addFields({ name: "\u200b", value: "\u200b", inline: false });
   }
 
-  // ── Section 2: SA Fixed Bosses ──────────────────────────────────────────
+  // ── Section 2: SA Fixed Bosses ─────────────────────────────────────────
   const fixedKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
-  const tierMap = {};
+  const tierMap   = {};
   for (const key of fixedKeys) {
     const first    = SHADOW_BOSSES.find(b => b.key === key);
     const respawnH = SA_RESPAWN_H[first.type];
@@ -1271,99 +1071,64 @@ function buildShadowEmbed(full = showFullDashboard) {
   }
 
   for (const [respawnH, keys] of Object.entries(tierMap).sort((a, b) => Number(a[0]) - Number(b[0]))) {
-    const tierServers = full
-      ? SA_SERVERS
-      : SA_SERVERS.filter(s => tierHasActiveSlotForServer(keys, s));
+    const tierServers = full ? SA_SERVERS : SA_SERVERS.filter(s => tierHasActiveSlotForServer(keys, s));
     if (!tierServers.length) continue;
-
     for (const s of tierServers) {
-      const visibleKeys = full
-        ? keys
-        : keys.filter(key => saFixedKeyHasActiveSlot(key, s));
+      const visibleKeys = full ? keys : keys.filter(key => saFixedKeyHasActiveSlot(key, s));
       if (!visibleKeys.length) continue;
-
       const lines = visibleKeys.map(key => {
         const first   = SHADOW_BOSSES.find(b => b.key === key);
         const isMulti = isMultiInstanceSAFixed(key);
-
         if (isMulti) {
           const instances = getSAFixedInstances(key, s);
-          if (full) {
-            const slots = instances.map(b => renderSAFixedSlot(b).text).join("  ");
-            return `**${first.label}**\n${slots}`;
-          } else {
-            const activeSlots = instances
-              .map(b => renderSAFixedSlot(b))
-              .filter(r => !r.isReady)
-              .map(r => r.text)
-              .join("  ");
-            return activeSlots ? `**${first.label}**\n${activeSlots}` : null;
-          }
-        } else {
-          const result = renderSAFixedSingle(`sa_${key}_s${s}`);
-          if (!full && result.isReady) return null;
-          return `**${first.label}**\n${result.text}`;
+          if (full) return `**${first.label}**\n${instances.map(b => renderSAFixedSlot(b).text).join("  ")}`;
+          const activeSlots = instances.map(b => renderSAFixedSlot(b)).filter(r => !r.isReady).map(r => r.text).join("  ");
+          return activeSlots ? `**${first.label}**\n${activeSlots}` : null;
         }
+        const result = renderSAFixedSingle(`sa_${key}_s${s}`);
+        if (!full && result.isReady) return null;
+        return `**${first.label}**\n${result.text}`;
       }).filter(Boolean);
-
       if (!lines.length) continue;
       embed.addFields({ name: `👹 SA Bosses *(${respawnH}h)* — S${s}`, value: lines.join("\n\n"), inline: true });
     }
     embed.addFields({ name: "\u200b", value: "\u200b", inline: false });
   }
 
-  // ── Section 3: World Bosses ──────────────────────────────────────────────
-  const wbKeys = [...new Set(WORLD_BOSSES.map(b => b.key))];
-  const wbServers = full
-    ? SA_SERVERS
-    : SA_SERVERS.filter(s => wbHasActiveSlotForServer(s));
+  // ── Section 3: World Bosses ────────────────────────────────────────────
+  const wbKeys    = [...new Set(WORLD_BOSSES.map(b => b.key))];
+  const wbServers = full ? SA_SERVERS : SA_SERVERS.filter(s => wbHasActiveSlotForServer(s));
 
   if (wbServers.length > 0) {
     for (const s of wbServers) {
-      const visibleWBKeys = full
-        ? wbKeys
-        : wbKeys.filter(key => {
-            const isMulti = isMultiInstanceWB(key);
-            if (isMulti) return getWBInstances(key, s).some(b => !renderWBMultiSlot(b).isReady);
-            return !renderWBSingle(`wb_${key}_s${s}`).isReady;
-          });
+      const visibleWBKeys = full ? wbKeys : wbKeys.filter(key => {
+        if (isMultiInstanceWB(key)) return getWBInstances(key, s).some(b => !renderWBMultiSlot(b).isReady);
+        return !renderWBSingle(`wb_${key}_s${s}`).isReady;
+      });
       if (!visibleWBKeys.length) continue;
-
       const lines = visibleWBKeys.map(key => {
         const cfg     = WORLD_BOSS_CONFIG[key];
         const label   = WORLD_BOSSES.find(b => b.key === key).label;
         const isMulti = isMultiInstanceWB(key);
-
         if (isMulti) {
           const instances = getWBInstances(key, s);
-          if (full) {
-            const slots = instances.map(b => renderWBMultiSlot(b).text).join("  ");
-            return `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${slots}`;
-          } else {
-            const activeSlots = instances
-              .map(b => renderWBMultiSlot(b))
-              .filter(r => !r.isReady)
-              .map(r => r.text)
-              .join("  ");
-            return activeSlots ? `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${activeSlots}` : null;
-          }
-        } else {
-          const result = renderWBSingle(`wb_${key}_s${s}`);
-          if (!full && result.isReady) return null;
-          return `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${result.text}`;
+          if (full) return `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${instances.map(b => renderWBMultiSlot(b).text).join("  ")}`;
+          const activeSlots = instances.map(b => renderWBMultiSlot(b)).filter(r => !r.isReady).map(r => r.text).join("  ");
+          return activeSlots ? `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${activeSlots}` : null;
         }
+        const result = renderWBSingle(`wb_${key}_s${s}`);
+        if (!full && result.isReady) return null;
+        return `**${label}** *(${cfg.respawnMs / HOUR}h)*\n${result.text}`;
       }).filter(Boolean);
-
       if (!lines.length) continue;
       embed.addFields({ name: `🌍 World Bosses — S${s}`, value: lines.join("\n\n"), inline: true });
     }
   }
 
-  // If nothing to show in compact mode
   if (!full) {
     const hasAnyField = embed.data.fields && embed.data.fields.some(f => f.name !== "\u200b");
     if (!hasAnyField) {
-      embed.setDescription("✅ No active timers — all bosses are ready to kill!\n\nTap **🔍 Show All** to see the full list.");
+      embed.setDescription("✅ No active timers — all bosses are ready to kill!");
     }
   }
 
@@ -1371,10 +1136,126 @@ function buildShadowEmbed(full = showFullDashboard) {
 }
 
 // =====================
+// RESPAWN SCHEDULE EMBED
+// =====================
+function buildRespawnEmbed() {
+  const now     = Date.now();
+  const entries = [];
+  const seenIds = new Set();
+
+  // ── Shadow Abyss bosses ──
+  for (const b of SHADOW_BOSSES) {
+    if (seenIds.has(b.id)) continue;
+    const e = data.kills[b.id];
+    if (!e) continue;
+    seenIds.add(b.id);
+
+    const isGoblin   = b.type === "goblin";
+    const cooldown   = e.respawnTime - now;
+    const windowEnd  = isGoblin ? e.respawnTime + SA_GOBLIN_WINDOW_MS : e.respawnTime + 5 * 60 * 1000;
+    const windowLeft = windowEnd - now;
+    const isMissed   = !!missedWindowMessages[b.id];
+    const advCount   = missedCount[b.id] || 0;
+
+    if (cooldown < -10 * 60 * 1000 && !isMissed) continue;
+
+    const tsRespawn = Math.floor(e.respawnTime / 1000);
+    let statusLine;
+    let sortTime;
+
+    if (isMissed) {
+      const mw     = missedWindowMessages[b.id];
+      const mwTs   = Math.floor((mw?.nextWindowStart ?? e.respawnTime) / 1000);
+      const mwEnd  = mw?.nextWindowEnd ?? e.respawnTime;
+      const locked = advCount >= SA_MAX_AUTO_ADVANCE;
+      statusLine = `⚠️ **MISSED x${advCount}${locked ? " 🔒" : ""}** — window <t:${mwTs}:t> → ${toServerTimeStr(mwEnd)} (server)\n  ${locked ? "🔒 Timer locked — update manually" : `Estimated next: <t:${mwTs}:R>`}`;
+      sortTime = mw?.nextWindowStart ?? e.respawnTime;
+    } else if (cooldown > 0) {
+      statusLine = `⏳ Spawns <t:${tsRespawn}:R> — <t:${tsRespawn}:t> (${toServerTimeStr(e.respawnTime)} server)`;
+      sortTime = e.respawnTime;
+    } else if (isGoblin && windowLeft > 0) {
+      statusLine = `🟢 **WINDOW OPEN** — closes in **${formatSeconds(windowLeft)}** (<t:${Math.floor(windowEnd / 1000)}:t>)`;
+      sortTime = windowEnd;
+    } else if (!isGoblin && cooldown >= -5 * 60 * 1000) {
+      statusLine = `🟡 **SPAWNED** — log the kill! (spawned <t:${tsRespawn}:R>)`;
+      sortTime = e.respawnTime;
+    } else {
+      continue;
+    }
+
+    entries.push({
+      sortTime,
+      isMissed,
+      cooldown,
+      line: `**[SA] ${b.name}** *(${e.lastKiller})*\n  ${statusLine}`
+    });
+  }
+
+  // ── World Bosses ──
+  for (const b of WORLD_BOSSES) {
+    if (seenIds.has(b.id)) continue;
+    const e = data.kills[b.id];
+    if (!e) continue;
+    seenIds.add(b.id);
+
+    const config     = getWorldBossConfig(b.id);
+    const cooldown   = e.respawnTime - now;
+    const windowEnd  = e.respawnTime + config.windowMs;
+    const windowLeft = windowEnd - now;
+    const isMissed   = !!missedWindowMessages[b.id];
+    const advCount   = missedCount[b.id] || 0;
+
+    if (cooldown < -10 * 60 * 1000 && !isMissed) continue;
+
+    const tsRespawn = Math.floor(e.respawnTime / 1000);
+    let statusLine;
+    let sortTime;
+
+    if (isMissed) {
+      const mw   = missedWindowMessages[b.id];
+      const mwTs = Math.floor((mw?.nextWindowStart ?? e.respawnTime) / 1000);
+      statusLine = `⚠️ **MISSED x${advCount}** — estimated window <t:${mwTs}:t>\n  ⚠️ Timer may be wrong — find and kill the boss`;
+      sortTime = mw?.nextWindowStart ?? e.respawnTime;
+    } else if (cooldown > 0) {
+      statusLine = `⏳ Spawns <t:${tsRespawn}:R> — <t:${tsRespawn}:t> (${toServerTimeStr(e.respawnTime)} server)`;
+      sortTime = e.respawnTime;
+    } else if (windowLeft > 0) {
+      statusLine = `🟢 **WINDOW OPEN** — closes in **${formatSeconds(windowLeft)}** (<t:${Math.floor(windowEnd / 1000)}:t>)`;
+      sortTime = windowEnd;
+    } else {
+      continue;
+    }
+
+    entries.push({
+      sortTime,
+      isMissed,
+      cooldown,
+      line: `**[WB] ${b.name}** *(${e.lastKiller})*\n  ${statusLine}`
+    });
+  }
+
+  // Sort: furthest at top, soonest at bottom
+  entries.sort((a, b) => b.sortTime - a.sortTime);
+
+  const description   = entries.length
+    ? entries.map(e => e.line).join("\n\n")
+    : "✅ No active timers — all bosses are ready!";
+
+  const missedCt    = entries.filter(e => e.isMissed).length;
+  const openWindows = entries.filter(e => !e.isMissed && e.cooldown <= 0).length;
+
+  return new EmbedBuilder()
+    .setTitle("📅 Respawn Schedule — Soonest at bottom")
+    .setColor(0x7b00ff)
+    .setDescription(description)
+    .setFooter({ text: `${entries.length} active timer(s) • ${openWindows} window(s) open • ${missedCt} missed • ${toServerTimeStr(now)} server time` });
+}
+
+// =====================
 // SHADOW ABYSS BUTTONS
 // =====================
 function buildShadowButtons() {
-  const rows = [];
+  const rows      = [];
   const goblinKeys = [...new Set(SHADOW_BOSSES.filter(b => b.type === "goblin").map(b => b.key))];
   const fixedKeys  = [...new Set(SHADOW_BOSSES.filter(b => b.type !== "goblin").map(b => b.key))];
 
@@ -1382,12 +1263,7 @@ function buildShadowButtons() {
     const row = new ActionRowBuilder();
     for (const key of goblinKeys.slice(i, i + 5)) {
       const label = SHADOW_BOSSES.find(b => b.key === key).label;
-      row.addComponents(
-        new ButtonBuilder()
-          .setCustomId("sa_kill_type_" + key)
-          .setLabel(label.slice(0, 20))
-          .setStyle(ButtonStyle.Primary)
-      );
+      row.addComponents(new ButtonBuilder().setCustomId("sa_kill_type_" + key).setLabel(label.slice(0, 20)).setStyle(ButtonStyle.Primary));
     }
     rows.push(row);
   }
@@ -1396,12 +1272,7 @@ function buildShadowButtons() {
     const row = new ActionRowBuilder();
     for (const key of fixedKeys.slice(i, i + 5)) {
       const label = SHADOW_BOSSES.find(b => b.key === key).label;
-      row.addComponents(
-        new ButtonBuilder()
-          .setCustomId("sa_kill_type_" + key)
-          .setLabel(label.slice(0, 20))
-          .setStyle(ButtonStyle.Secondary)
-      );
+      row.addComponents(new ButtonBuilder().setCustomId("sa_kill_type_" + key).setLabel(label.slice(0, 20)).setStyle(ButtonStyle.Secondary));
     }
     rows.push(row);
   }
@@ -1411,25 +1282,18 @@ function buildShadowButtons() {
     const row = new ActionRowBuilder();
     for (const key of wbKeys.slice(i, i + 5)) {
       const label = WORLD_BOSSES.find(b => b.key === key).label;
-      row.addComponents(
-        new ButtonBuilder()
-          .setCustomId("wb_kill_type_" + key)
-          .setLabel(label.slice(0, 20))
-          .setStyle(ButtonStyle.Success)
-      );
+      row.addComponents(new ButtonBuilder().setCustomId("wb_kill_type_" + key).setLabel(label.slice(0, 20)).setStyle(ButtonStyle.Success));
     }
     rows.push(row);
   }
 
+  // Controls row — 📊 Dashboard opens the tracker ephemerally for the user
   rows.push(new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("sa_insert_time").setLabel("📝 Insert").setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId("sa_reset").setLabel("🧹 Reset").setStyle(ButtonStyle.Danger),
     new ButtonBuilder().setCustomId("sa_undo").setLabel("↩️ Undo").setStyle(ButtonStyle.Success),
-    new ButtonBuilder().setCustomId("show_logs").setLabel("📜 Logs").setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId("toggle_full_dashboard")
-      .setLabel(showFullDashboard ? "🔼 Compact" : "🔍 Show All")
-      .setStyle(showFullDashboard ? ButtonStyle.Primary : ButtonStyle.Secondary)
+    new ButtonBuilder().setCustomId("show_respawn").setLabel("📅 Respawn").setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId("show_dashboard").setLabel("📊 Dashboard").setStyle(ButtonStyle.Secondary)
   ));
 
   return rows;
@@ -1444,49 +1308,54 @@ async function repinDashboard(channel) {
   try {
     const now = Date.now();
 
-    if (logMessage) logMessage.delete().catch(() => {});
-    logMessage = await channel.send({
-      embeds: [buildLogEmbed()],
-      flags:  MessageFlags.SuppressNotifications
-    }).catch(err => { console.error("[Repin] Failed to re-post log message:", err.message ?? err); return null; });
-
+    // Pinned message is buttons-only — no embed
     const newDashboard = await channel.send({
-      embeds: [buildShadowEmbed()], components: buildShadowButtons(), flags: MessageFlags.SuppressNotifications
+      content: "**🌑 Shadow Abyss — Boss Tracker**",
+      components: buildShadowButtons(),
+      flags: MessageFlags.SuppressNotifications
     }).catch(err => { console.error("[Repin] Failed to post dashboard:", err.message ?? err); return null; });
 
     if (!newDashboard) return;
     if (dashboardMessage) dashboardMessage.delete().catch(() => {});
     dashboardMessage = newDashboard;
 
-    for (const id of Object.keys(missedWindowMessages)) {
-      const w = missedWindowMessages[id];
-      if (w.nextWindowStart > now) { if (w.msg) { w.msg.delete().catch(() => {}); w.msg = null; } continue; }
-      if (w.nextWindowEnd + WINDOW_GRACE_MS <= now) { if (w.msg) w.msg.delete().catch(() => {}); delete missedWindowMessages[id]; continue; }
-      if (w.msg) w.msg.delete().catch(() => {});
-      const isWorld    = !!w.isWorld;
-      const advCount   = missedCount[id] || 0;
-      w.msg = await channel.send({
-        embeds:     isWorld
-          ? [buildWBMissedWindowEmbed(w.boss, w.nextWindowStart, w.nextWindowEnd)]
-          : [buildSAMissedWindowEmbed(w.boss, w.nextWindowStart, w.nextWindowEnd, advCount)],
-        components: isWorld
-          ? buildWBMissedWindowComponents(id)
-          : buildSAMissedWindowComponents(id),
-        flags: MessageFlags.SuppressNotifications
-      }).catch(() => null);
+    // Delete all existing spawn window messages from Discord first
+    for (const [id, w] of Object.entries(spawnWindowMessages)) {
+      if (w.msg) { w.msg.delete().catch(() => {}); w.msg = null; }
+      clearTimeout(w.deleteTimer);
+      if (w.windowEnd + WINDOW_GRACE_MS <= now) { delete spawnWindowMessages[id]; }
     }
 
-    for (const id of Object.keys(spawnWindowMessages)) {
-      const w = spawnWindowMessages[id];
-      if (w.msg) w.msg.delete().catch(() => {});
-      if (w.windowEnd + WINDOW_GRACE_MS > now) {
-        const isWorld = !!WORLD_BOSSES.find(b => b.id === id);
-        w.msg = await channel.send({
-          embeds:     [isWorld ? buildWBSpawnWindowEmbed(w.boss, w.windowStart, w.windowEnd) : buildSASpawnWindowEmbed(w.boss, w.windowStart, w.windowEnd)],
-          components: isWorld ? buildWBSpawnWindowComponents(id) : buildSASpawnWindowComponents(id),
-          flags: MessageFlags.SuppressNotifications
-        }).catch(() => null);
-      } else { delete spawnWindowMessages[id]; }
+    // Delete all existing missed window messages from Discord first
+    for (const [id, w] of Object.entries(missedWindowMessages)) {
+      if (w.msg) { w.msg.delete().catch(() => {}); w.msg = null; }
+    }
+
+    // Repost still-valid spawn window messages
+    for (const [id, w] of Object.entries(spawnWindowMessages)) {
+      if (w.windowEnd + WINDOW_GRACE_MS <= now) { delete spawnWindowMessages[id]; continue; }
+      const isWorld = !!w.isWorld;
+      w.msg = await channel.send({
+        embeds:     [isWorld ? buildWBSpawnWindowEmbed(w.boss, w.windowStart, w.windowEnd) : buildSASpawnWindowEmbed(w.boss, w.windowStart, w.windowEnd)],
+        components: isWorld ? buildWBSpawnWindowComponents(id) : buildSASpawnWindowComponents(id),
+        flags: MessageFlags.SuppressNotifications
+      }).catch(() => null);
+      clearTimeout(w.deleteTimer);
+      const deleteAfter = (w.windowEnd - now) + WINDOW_GRACE_MS;
+      w.deleteTimer = setTimeout(() => { if (w.msg) w.msg.delete().catch(() => {}); delete spawnWindowMessages[id]; }, Math.max(deleteAfter, 0));
+    }
+
+    // Repost still-valid missed window messages
+    for (const [id, w] of Object.entries(missedWindowMessages)) {
+      if (w.nextWindowEnd + WINDOW_GRACE_MS <= now) { delete missedWindowMessages[id]; continue; }
+      if (w.nextWindowStart > now) { w.msg = null; continue; }
+      const isWorld  = !!w.isWorld;
+      const advCount = missedCount[id] || 0;
+      w.msg = await channel.send({
+        embeds:     isWorld ? [buildWBMissedWindowEmbed(w.boss, w.nextWindowStart, w.nextWindowEnd)] : [buildSAMissedWindowEmbed(w.boss, w.nextWindowStart, w.nextWindowEnd, advCount)],
+        components: isWorld ? buildWBMissedWindowComponents(id) : buildSAMissedWindowComponents(id),
+        flags: MessageFlags.SuppressNotifications
+      }).catch(() => null);
     }
 
     lastRepinTime     = now;
@@ -1495,9 +1364,6 @@ async function repinDashboard(channel) {
   } finally { repinInProgress = false; }
 }
 
-// =====================
-// INTERACTION-TRIGGERED REPIN
-// =====================
 async function maybeRepinAfterAction(channel) {
   actionsSinceRepin++;
   const now = Date.now();
@@ -1543,129 +1409,53 @@ async function createWBSpawnWindow(boss, id, channel, windowEnd) {
 }
 
 // =====================
-// MISSED WINDOW / AUTO-ADVANCE — Shadow Abyss goblin-type
+// MISSED WINDOW — Shadow Abyss goblin-type (log only, free slot)
 // =====================
 async function handleSAMissedWindowGoblin(boss, id, channel) {
   const e = data.kills[id];
   if (!e) return;
-  const count = (missedCount[id] || 0) + 1;
-  missedCount[id] = count;
-  if (count > SA_MAX_AUTO_ADVANCE) {
-    console.log(`[SA MissedWindow] ${boss.name} already at max advances (${SA_MAX_AUTO_ADVANCE}), skipping.`);
-    return;
-  }
-  console.log(`[SA MissedWindow] No kill for ${boss.name} — auto-advancing ${SA_RESPAWN_H.goblin}h (advance #${count})`);
-  snapshot();
-  const respawnMs = SA_RESPAWN_H.goblin * 60 * 60 * 1000;
-  e.killTime    = e.respawnTime;
-  e.respawnTime = e.respawnTime + respawnMs;
+  const lastKill    = toServerDateTimeStr(e.killTime);
+  const nextRespawn = toServerDateTimeStr(e.respawnTime);
+  console.log(`[SA MissedWindow] ${boss.name} — window missed. Last kill: ${lastKill}, next kill timer was: ${nextRespawn}`);
+  logBot(`SA MISSED WINDOW ${boss.name} — last kill: ${lastKill} — next kill timer: ${nextRespawn} — slot freed`);
+  clearSABossCards(id);
+  delete data.kills[id];
   save();
-  logBot(`SA AUTO-ADVANCE ${boss.name} — missed window #${count}/${SA_MAX_AUTO_ADVANCE} — new respawn: ${toServerDateTimeStr(e.respawnTime)}${count >= SA_MAX_AUTO_ADVANCE ? " — 🔒 LOCKED" : ""}`);
   spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
-  clearSABossCards(id, false);
-  const now = Date.now();
-  const nextWindowStart = e.respawnTime;
-  const nextWindowEnd   = now + (SA_GOBLIN_WINDOW_MS + 60 * 60 * 1000);
-  missedWindowMessages[id] = {
-    msg: null, deleteTimer: null,
-    nextWindowStart, nextWindowEnd,
-    pingedStart: false, pinged1h: false, pinged20min: false, boss, isShadow: true,
-  };
-  const tsOpen  = Math.floor(nextWindowStart / 1000);
-  const tsClose = Math.floor(nextWindowEnd   / 1000);
-  if (count >= SA_MAX_AUTO_ADVANCE) {
-    postEveryoneWarning(channel, `${id}_sa_locked`,
-      `@everyone 🔒 **[Shadow Abyss] ${boss.name}** has missed its spawn window **${count}/${SA_MAX_AUTO_ADVANCE} times** — TIMER LOCKED!\n` +
-      `⚠️ Please find the goblin and manually update the timer.\n` +
-      `📍 Last estimated window: ${toServerTimeStr(nextWindowStart)} – ${toServerTimeStr(nextWindowEnd)} (server)\n` +
-      `<t:${tsOpen}:t> — <t:${tsClose}:t> (your time)`,
-      30 * 60 * 1000);
-  } else {
-    postEveryoneWarning(channel, `${id}_sa_stale_${count}`,
-      `@everyone ⚠️ **[Shadow Abyss] ${boss.name}** missed window #${count}/${SA_MAX_AUTO_ADVANCE}.\n` +
-      `📍 Next estimated window: ${toServerTimeStr(nextWindowStart)} – ${toServerTimeStr(nextWindowEnd)} (server)\n` +
-      `<t:${tsOpen}:t> — <t:${tsClose}:t> (your time)`,
-      30 * 60 * 1000);
-  }
 }
 
 // =====================
-// MISSED WINDOW — Shadow Abyss fixed-respawn types
+// MISSED WINDOW — Shadow Abyss fixed-respawn types (log only, free slot)
 // =====================
 async function handleSAMissedWindowFixed(boss, id, channel) {
   const e = data.kills[id];
   if (!e) return;
-  const count = (missedCount[id] || 0) + 1;
-  missedCount[id] = count;
-  const now = Date.now();
-  console.log(`[SA MissedWindow Fixed] ${boss.name} — missed #${count}`);
-  logBot(`SA MISSED SPAWN ${boss.name} — no kill logged (miss #${count}) — was due: ${toServerDateTimeStr(e.respawnTime)}`);
-
-  const nextWindowStart = e.respawnTime;
-  const nextWindowEnd   = now + SA_FIXED_MISSED_WINDOW_MS;
-  if (!missedWindowMessages[id]) {
-    missedWindowMessages[id] = {
-      msg: null, deleteTimer: null,
-      nextWindowStart, nextWindowEnd,
-      pingedStart: true, pinged1h: false, pinged20min: false, boss, isShadow: true,
-    };
-  } else {
-    missedWindowMessages[id].nextWindowEnd = nextWindowEnd;
-  }
-  const tsRespawn = Math.floor(e.respawnTime / 1000);
-  postEveryoneWarning(channel, `${id}_sa_fixed_missed_${count}`,
-    `@everyone 🚨 **[Shadow Abyss] ${boss.name}** spawned but no kill was logged!\n` +
-    `🕒 Was due: ${toServerTimeStr(e.respawnTime)} (server) — <t:${tsRespawn}:t>\n` +
-    `Please log the kill using the ⏱️ Set Time button.`,
-    20 * 60 * 1000);
+  const lastKill    = toServerDateTimeStr(e.killTime);
+  const nextRespawn = toServerDateTimeStr(e.respawnTime);
+  console.log(`[SA MissedWindow Fixed] ${boss.name} — window missed. Last kill: ${lastKill}, next kill timer was: ${nextRespawn}`);
+  logBot(`SA MISSED WINDOW ${boss.name} — last kill: ${lastKill} — next kill timer: ${nextRespawn} — slot freed`);
+  clearSABossCards(id);
+  delete data.kills[id];
+  save();
+  spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
 }
 
 // =====================
-// MISSED WINDOW — World Bosses
+// MISSED WINDOW — World Bosses (log only, free slot)
 // =====================
 async function handleWBMissedWindow(boss, id, channel) {
   const e = data.kills[id];
   if (!e) return;
   const config = getWorldBossConfig(id);
-  missedCount[id] = (missedCount[id] || 0) + 1;
-  const count = missedCount[id];
-  const now   = Date.now();
-
-  if (count > config.maxMissed) {
-    console.log(`[WB MissedWindow] ${boss.name} exceeded max missed (${config.maxMissed}), stopping.`);
-    const content = `@everyone 🚨 **[World Boss] ${boss.name}** timer is **stale** (${count} misses, max ${config.maxMissed}). Please find and kill the boss, then update the timer manually.`;
-    postEveryoneWarning(channel, `${id}_wb_stale_timer`, content, 30 * 60 * 1000, boss.key);
-    return;
-  }
-
-  const advanceHours = config.respawnMs / HOUR;
-  console.log(`[WB MissedWindow] No kill for ${boss.name} — auto-advancing ${advanceHours}h (advance #${count})`);
-  snapshot();
-  e.respawnTime = e.respawnTime + config.respawnMs;
-  e.killTime    = e.respawnTime - config.respawnMs;
+  if (config.maxMissed === 0) return;
+  const lastKill    = toServerDateTimeStr(e.killTime);
+  const nextRespawn = toServerDateTimeStr(e.respawnTime);
+  console.log(`[WB MissedWindow] ${boss.name} — window missed. Last kill: ${lastKill}, next kill timer was: ${nextRespawn}`);
+  logBot(`WB MISSED WINDOW ${boss.name} — last kill: ${lastKill} — next kill timer: ${nextRespawn} — slot freed`);
+  clearWBBossCards(id);
+  delete data.kills[id];
   save();
-  logBot(`WB AUTO-ADVANCE ${boss.name} — missed window #${count}/${config.maxMissed} — new respawn: ${toServerDateTimeStr(e.respawnTime)}`);
   spawnWarnings[id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
-  clearWBBossCards(id, false);
-
-  const nextWindowStart = e.respawnTime;
-  const nextWindowEnd   = now + config.missedWindowMs;
-  missedWindowMessages[id] = {
-    msg: null, deleteTimer: null,
-    nextWindowStart, nextWindowEnd,
-    pingedStart: false, pinged1h: false, pinged20min: false, boss, isWorld: true,
-  };
-
-  if (count >= 2) {
-    const tsOpen  = Math.floor(nextWindowStart / 1000);
-    const tsClose = Math.floor(nextWindowEnd   / 1000);
-    const content =
-      `@everyone 🚨 **[World Boss] ${boss.name}** has missed its spawn window **${count} times** in a row!\n` +
-      `The timer is likely wrong — please find and kill the boss to reset it.\n` +
-      `📍 Next estimated window: ${toServerTimeStr(nextWindowStart)} – ${toServerTimeStr(nextWindowEnd)} (server)\n` +
-      `<t:${tsOpen}:t> — <t:${tsClose}:t> (your time)`;
-    postEveryoneWarning(channel, `${id}_wb_stale_timer`, content, 30 * 60 * 1000, boss.key);
-  }
 }
 
 // =====================
@@ -1695,8 +1485,9 @@ function startLoop() {
         return;
       }
 
+      // Pinned message only has buttons — just refresh components
       try {
-        await dashboardMessage.edit({ embeds: [buildShadowEmbed()], components: buildShadowButtons() });
+        await dashboardMessage.edit({ components: buildShadowButtons() });
       } catch (err) {
         if (err.code === 10008) {
           console.warn("[Loop] Dashboard deleted — repinning full stack.");
@@ -1745,56 +1536,7 @@ function startLoop() {
 // MISSED WINDOW PINGS
 // =====================
 function tickMissedWindowPings(channel, now) {
-  for (const id of Object.keys(missedWindowMessages)) {
-    const w        = missedWindowMessages[id];
-    const isWorld  = !!w.isWorld;
-    const untilStart = w.nextWindowStart - now;
-    const untilEnd   = w.nextWindowEnd   - now;
-
-    if (untilStart <= 0 && !w.msg && untilEnd + WINDOW_GRACE_MS > 0) {
-      const advCount = missedCount[id] || 0;
-      channel.send({
-        embeds: isWorld
-          ? [buildWBMissedWindowEmbed(w.boss, w.nextWindowStart, w.nextWindowEnd)]
-          : [buildSAMissedWindowEmbed(w.boss, w.nextWindowStart, w.nextWindowEnd, advCount)],
-        components: isWorld
-          ? buildWBMissedWindowComponents(id)
-          : buildSAMissedWindowComponents(id),
-        flags: MessageFlags.SuppressNotifications
-      }).then(msg => { w.msg = msg; }).catch(() => {});
-    }
-
-    if (!w.pingedStart && untilStart <= 0 && untilEnd > 0) {
-      w.pingedStart = true;
-      const tsClose  = Math.floor(w.nextWindowEnd / 1000);
-      const advCount = missedCount[id] || 0;
-      const prefix   = isWorld ? "[World Boss]" : "[Shadow Abyss]";
-      const bossKey  = w.boss?.key ?? null;
-      postEveryoneWarning(channel, `${id}_missed_start`,
-        `@everyone 🔶 **${prefix} ${w.boss.name}** missed window is now open! ` +
-        `Closes in **${format(untilEnd)}** — <t:${tsClose}:t>\n` +
-        (isWorld
-          ? `⚠️ Timer might be incorrect — boss may take longer to respawn.`
-          : `⚠️ Missed: ${advCount}/${SA_MAX_AUTO_ADVANCE} — timer might be incorrect.`),
-        EVERYONE_WARNING_LIFESPAN_MS,
-        bossKey
-      );
-    }
-
-    if (!w.pinged20min && untilEnd > 0 && untilEnd <= 20 * 60 * 1000) {
-      w.pinged20min = true;
-      const advCount = missedCount[id] || 0;
-      const prefix   = isWorld ? "[World Boss]" : "[Shadow Abyss]";
-      const bossKey  = w.boss?.key ?? null;
-      postEveryoneWarning(channel, `${id}_missed_20min`,
-        isWorld
-          ? `@everyone ⚠️ **${prefix} ${w.boss.name}** missed-window: **20 minutes remaining** in the spawn window!`
-          : `@everyone ⚠️ **${prefix} ${w.boss.name}** missed-window: **20 minutes remaining**! (${advCount}/${SA_MAX_AUTO_ADVANCE} missed)`,
-        EVERYONE_WARNING_LIFESPAN_MS,
-        bossKey
-      );
-    }
-  }
+  // Disabled — missed windows free the slot and log only
 }
 
 // =====================
@@ -1817,10 +1559,8 @@ function checkSAWarnings(channel) {
     const w = spawnWarnings[b.id];
     if (cooldown > 0 && cooldown <= 5 * 60 * 1000 && !w.warned5) {
       w.warned5 = true;
-      if (!missedWindowMessages[b.id]) {
-        postEveryoneWarning(channel, `${b.id}_5min`,
-          `@everyone ⏳ **[Shadow Abyss] ${b.name}** spawns in 5 minutes`, Math.max(cooldown, 0));
-      }
+      if (!missedWindowMessages[b.id])
+        postEveryoneWarning(channel, `${b.id}_5min`, `@everyone ⏳ **[Shadow Abyss] ${b.name}** spawns in 5 minutes`, Math.max(cooldown, 0));
     }
     if (isGoblin && cooldown <= 0 && windowLeft > 0 && !w.windowCreated) {
       w.windowCreated = true;
@@ -1829,12 +1569,14 @@ function checkSAWarnings(channel) {
     }
     if (isGoblin && cooldown <= 0 && windowLeft > 0 && windowLeft <= 20 * 60 * 1000 && !w.warned20) {
       w.warned20 = true;
-      postEveryoneWarning(channel, `${b.id}_20min`,
-        `@everyone ⚠️ **[Shadow Abyss] ${b.name}** goblin window closes in 20 minutes!`);
+      postEveryoneWarning(channel, `${b.id}_20min`, `@everyone ⚠️ **[Shadow Abyss] ${b.name}** goblin window closes in 20 minutes!`);
     }
     if (!isGoblin && cooldown <= 0 && cooldown >= -5 * 60 * 1000 && !w.windowCreated) {
       w.windowCreated = true;
       clearEveryoneWarning(`${b.id}_5min`);
+
+      if (!missedWindowMessages[b.id]) createSASpawnWindow(b, b.id, channel, windowEnd);
+
       const tsRespawn = Math.floor(e.respawnTime / 1000);
       postEveryoneWarning(channel, `${b.id}_spawned`,
         `@everyone 🌑 **[Shadow Abyss] ${b.name}** has spawned! Log the kill when done.\n<t:${tsRespawn}:t>`,
@@ -1842,11 +1584,8 @@ function checkSAWarnings(channel) {
     }
     if (timeSinceWindowExpired >= 10 * 60 * 1000 && !w.missedHandled) {
       w.missedHandled = true;
-      if (isGoblin && advCount < SA_MAX_AUTO_ADVANCE) {
-        handleSAMissedWindowGoblin(b, b.id, channel);
-      } else if (!isGoblin) {
-        handleSAMissedWindowFixed(b, b.id, channel);
-      }
+      if (isGoblin && advCount < SA_MAX_AUTO_ADVANCE) handleSAMissedWindowGoblin(b, b.id, channel);
+      else if (!isGoblin) handleSAMissedWindowFixed(b, b.id, channel);
     }
   }
 }
@@ -1870,26 +1609,19 @@ function checkWBWarnings(channel) {
     const w = spawnWarnings[b.id];
     if (cooldown > 0 && cooldown <= 5 * 60 * 1000 && !w.warned5) {
       w.warned5 = true;
-      if (!missedWindowMessages[b.id]) {
-        postEveryoneWarning(channel, `${b.id}_5min`,
-          `@everyone ⏳ **[World Boss] ${b.name}** spawns in 5 minutes`,
-          Math.max(cooldown, 0),
-          b.key
-        );
-      }
+      if (!missedWindowMessages[b.id])
+        postEveryoneWarning(channel, `${b.id}_5min`, `@everyone ⏳ **[World Boss] ${b.name}** spawns in 5 minutes`, Math.max(cooldown, 0), b.key);
     }
     if (cooldown <= 0 && windowLeft > 0 && !w.windowCreated) {
       w.windowCreated = true;
       clearEveryoneWarning(`${b.id}_5min`);
       if (!missedWindowMessages[b.id]) createWBSpawnWindow(b, b.id, channel, windowEnd);
     }
-    if (cooldown <= 0 && windowLeft > 0 && windowLeft <= 20 * 60 * 1000 && !w.warned20) {
+    if (config.windowMs > 20 * 60 * 1000 && cooldown <= 0 && windowLeft > 0 && windowLeft <= 20 * 60 * 1000 && !w.warned20) {
       w.warned20 = true;
       postEveryoneWarning(channel, `${b.id}_20min`,
         `@everyone ⚠️ **[World Boss] ${b.name}** spawn window closes in 20 minutes!`,
-        EVERYONE_WARNING_LIFESPAN_MS,
-        b.key
-      );
+        EVERYONE_WARNING_LIFESPAN_MS, b.key);
     }
     if (timeSinceWindowExpired >= 10 * 60 * 1000 && !w.missedHandled) {
       w.missedHandled = true;
@@ -1958,13 +1690,11 @@ client.once(Events.ClientReady, async () => {
   try { await initBackupMessage(await client.channels.fetch(LOG_CHANNEL_ID)); }
   catch (err) { console.error("[Backup] Could not init:", err.message ?? err); }
 
-  logMessage = await channel.send({
-    embeds: [buildLogEmbed()],
-    flags:  MessageFlags.SuppressNotifications
-  }).catch(err => { console.error("[Ready] Failed to post log message:", err.message ?? err); return null; });
-
+  // Pinned message is buttons-only — no embed
   dashboardMessage = await channel.send({
-    embeds: [buildShadowEmbed()], components: buildShadowButtons(), flags: MessageFlags.SuppressNotifications
+    content: "**🌑 Shadow Abyss — Boss Tracker**",
+    components: buildShadowButtons(),
+    flags: MessageFlags.SuppressNotifications
   });
 
   lastRepinTime     = Date.now();
@@ -1974,6 +1704,18 @@ client.once(Events.ClientReady, async () => {
   startBackupLoop();
   setTimeout(() => runBackup().catch(err => console.error("[Backup] Startup failed:", err.message ?? err)), 5000);
 });
+
+// =====================
+// HELPER — build a time input field (blank = now)
+// =====================
+function buildTimeInput() {
+  return new TextInputBuilder()
+    .setCustomId("time")
+    .setLabel("HH:MM (server time) or leave blank for now")
+    .setStyle(TextInputStyle.Short)
+    .setPlaceholder("Leave blank = now, or e.g. 21:34")
+    .setRequired(false);
+}
 
 // =====================
 // INTERACTIONS
@@ -1986,9 +1728,14 @@ client.on(Events.InteractionCreate, async interaction => {
     repostBackupToBottom();
   }
 
-  // ── LOGS ──
-  if (interaction.isButton() && interaction.customId === "show_logs") {
-    return interaction.reply({ embeds: [buildLogEmbed()], flags: MessageFlags.Ephemeral });
+  // ── RESPAWN SCHEDULE ──
+  if (interaction.isButton() && interaction.customId === "show_respawn") {
+    return interaction.reply({ embeds: [buildRespawnEmbed()], flags: MessageFlags.Ephemeral });
+  }
+
+  // ── DASHBOARD — ephemeral per-user view ──
+  if (interaction.isButton() && interaction.customId === "show_dashboard") {
+    return interaction.reply({ embeds: [buildShadowEmbed(true)], flags: MessageFlags.Ephemeral });
   }
 
   // ── SA: KILL TYPE BUTTON — pick server ──
@@ -2009,27 +1756,17 @@ client.on(Events.InteractionCreate, async interaction => {
 
   // ── SA: SERVER SELECTED ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("sa_server_select_")) {
-    const key    = interaction.customId.replace("sa_server_select_", "");
-    const server = parseInt(interaction.values[0], 10);
-    const isGoblinType     = SHADOW_BOSSES.find(b => b.key === key)?.type === "goblin";
-    const isMultiSAFixed   = isMultiInstanceSAFixed(key);
+    const key          = interaction.customId.replace("sa_server_select_", "");
+    const server       = parseInt(interaction.values[0], 10);
+    const isGoblinType = SHADOW_BOSSES.find(b => b.key === key)?.type === "goblin";
+    const isMultiSAFixed = isMultiInstanceSAFixed(key);
 
     if (isGoblinType) {
       const boss = pickNextGoblin(key, server);
-      if (!boss) {
-        return interaction.reply({ content: `❌ No goblin found for ${key} S${server}.`, flags: MessageFlags.Ephemeral });
-      }
+      if (!boss) return interaction.reply({ content: `❌ No goblin found for ${key} S${server}.`, flags: MessageFlags.Ephemeral });
       log(interaction.user, `SA: Selected server ${server} for ${boss.name} (auto-picked goblin)`);
-      const modal = new ModalBuilder()
-        .setCustomId(`sa_killtime_${boss.id}`)
-        .setTitle(`Kill Time — ${boss.name}`);
-      modal.addComponents(new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("time")
-          .setLabel("HH:MM (24h, server time) or 'now'")
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder("e.g. 21:34 or now")
-      ));
+      const modal = new ModalBuilder().setCustomId(`sa_killtime_${boss.id}`).setTitle(`Kill Time — ${boss.name}`);
+      modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
       return interaction.showModal(modal);
     }
 
@@ -2037,53 +1774,32 @@ client.on(Events.InteractionCreate, async interaction => {
       const boss = pickNextSAFixedInstance(key, server);
       if (boss) {
         log(interaction.user, `SA: Auto-picked ${boss.name} for kill`);
-        const modal = new ModalBuilder()
-          .setCustomId(`sa_killtime_${boss.id}`)
-          .setTitle(`Kill Time — ${boss.name}`);
-        modal.addComponents(new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId("time")
-            .setLabel("HH:MM (24h, server time) or 'now'")
-            .setStyle(TextInputStyle.Short)
-            .setPlaceholder("e.g. 21:34 or now")
-        ));
+        const modal = new ModalBuilder().setCustomId(`sa_killtime_${boss.id}`).setTitle(`Kill Time — ${boss.name}`);
+        modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
         return interaction.showModal(modal);
-      } else {
-        const instances = getSAFixedInstances(key, server);
-        const now = Date.now();
-        const menu = new StringSelectMenuBuilder()
-          .setCustomId(`sa_pick_instance_${key}_s${server}`)
-          .setPlaceholder("All slots busy — pick which to update")
-          .addOptions(instances.map(b => {
-            const e = data.kills[b.id];
-            let status = "🟢 READY";
-            if (e) {
-              const cd = e.respawnTime - now;
-              status = cd > 0 ? `🔴 ${format(cd)}` : `🟡 SPAWNED`;
-            }
-            return { label: `#${b.index} — ${status}`, value: b.id };
-          }));
-        return interaction.reply({
-          content: `⚠️ **${SHADOW_BOSSES.find(b => b.key === key).label} S${server}** — All slots are active. Pick which instance to update:`,
-          components: [new ActionRowBuilder().addComponents(menu)],
-          flags: MessageFlags.Ephemeral
-        });
       }
+      const instances = getSAFixedInstances(key, server);
+      const now = Date.now();
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId(`sa_pick_instance_${key}_s${server}`)
+        .setPlaceholder("All slots busy — pick which to update")
+        .addOptions(instances.map(b => {
+          const e = data.kills[b.id];
+          let status = "🟢 READY";
+          if (e) { const cd = e.respawnTime - now; status = cd > 0 ? `⏳ ${format(cd)}` : `🟡 SPAWNED`; }
+          return { label: `#${b.index} — ${status}`, value: b.id };
+        }));
+      return interaction.reply({
+        content: `⚠️ **${SHADOW_BOSSES.find(b => b.key === key).label} S${server}** — All slots are active. Pick which instance to update:`,
+        components: [new ActionRowBuilder().addComponents(menu)], flags: MessageFlags.Ephemeral
+      });
     }
 
     const id   = `sa_${key}_s${server}`;
     const boss = SHADOW_BOSSES.find(b => b.id === id);
     log(interaction.user, `SA: Selected server ${server} for ${boss.name}`);
-    const modal = new ModalBuilder()
-      .setCustomId(`sa_killtime_${boss.id}`)
-      .setTitle(`Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId("time")
-        .setLabel("HH:MM (24h, server time) or 'now'")
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder("e.g. 21:34 or now")
-    ));
+    const modal = new ModalBuilder().setCustomId(`sa_killtime_${boss.id}`).setTitle(`Kill Time — ${boss.name}`);
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2092,12 +1808,8 @@ client.on(Events.InteractionCreate, async interaction => {
     const id   = interaction.values[0];
     const boss = SHADOW_BOSSES.find(b => b.id === id);
     log(interaction.user, `SA: Manually picked instance ${boss.name}`);
-    const modal = new ModalBuilder()
-      .setCustomId(`sa_killtime_${id}`)
-      .setTitle(`Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-    ));
+    const modal = new ModalBuilder().setCustomId(`sa_killtime_${id}`).setTitle(`Kill Time — ${boss.name}`);
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2106,7 +1818,7 @@ client.on(Events.InteractionCreate, async interaction => {
     snapshot();
     const id   = interaction.customId.replace("sa_killtime_", "");
     const boss = SHADOW_BOSSES.find(b => b.id === id);
-    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase();
+    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase() || "now";
     const now  = Date.now();
     let killTime;
     if (raw === "now") { killTime = now; }
@@ -2130,8 +1842,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const id   = interaction.customId.replace("sa_window_kill_", "");
     const boss = SHADOW_BOSSES.find(b => b.id === id);
     const now  = Date.now();
-    const respawnMs   = SA_RESPAWN_H[boss.type] * 60 * 60 * 1000;
-    const respawnTime = now + respawnMs;
+    const respawnTime = now + SA_RESPAWN_H[boss.type] * 60 * 60 * 1000;
     clearSABossCards(id);
     data.kills[id] = { killTime: now, respawnTime, lastKiller: interaction.user.username };
     save();
@@ -2149,9 +1860,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const boss = SHADOW_BOSSES.find(b => b.id === id);
     log(interaction.user, `SA: Opened set-time modal for ${boss.name} (window)`);
     const modal = new ModalBuilder().setCustomId(`sa_window_killtime_${id}`).setTitle(`Set Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-    ));
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2160,13 +1869,12 @@ client.on(Events.InteractionCreate, async interaction => {
     snapshot();
     const id   = interaction.customId.replace("sa_window_killtime_", "");
     const boss = SHADOW_BOSSES.find(b => b.id === id);
-    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase();
+    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase() || "now";
     const now  = Date.now();
     let killTime;
     if (raw === "now") { killTime = now; }
     else { const [h, m] = raw.split(":").map(Number); killTime = parseServerTime(h, m).getTime(); }
-    const respawnMs   = SA_RESPAWN_H[boss.type] * 60 * 60 * 1000;
-    const respawnTime = killTime + respawnMs;
+    const respawnTime = killTime + SA_RESPAWN_H[boss.type] * 60 * 60 * 1000;
     clearSABossCards(id);
     data.kills[id] = { killTime, respawnTime, lastKiller: interaction.user.username };
     save();
@@ -2184,8 +1892,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const id   = interaction.customId.replace("sa_missed_kill_", "");
     const boss = SHADOW_BOSSES.find(b => b.id === id);
     const now  = Date.now();
-    const respawnMs   = SA_RESPAWN_H[boss.type] * 60 * 60 * 1000;
-    const respawnTime = now + respawnMs;
+    const respawnTime = now + SA_RESPAWN_H[boss.type] * 60 * 60 * 1000;
     clearSABossCards(id);
     data.kills[id] = { killTime: now, respawnTime, lastKiller: interaction.user.username };
     save();
@@ -2203,9 +1910,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const boss = SHADOW_BOSSES.find(b => b.id === id);
     log(interaction.user, `SA: Opened set-time modal for ${boss.name} (missed window)`);
     const modal = new ModalBuilder().setCustomId(`sa_missed_killtime_${id}`).setTitle(`Set Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-    ));
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2214,13 +1919,12 @@ client.on(Events.InteractionCreate, async interaction => {
     snapshot();
     const id   = interaction.customId.replace("sa_missed_killtime_", "");
     const boss = SHADOW_BOSSES.find(b => b.id === id);
-    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase();
+    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase() || "now";
     const now  = Date.now();
     let killTime;
     if (raw === "now") { killTime = now; }
     else { const [h, m] = raw.split(":").map(Number); killTime = parseServerTime(h, m).getTime(); }
-    const respawnMs   = SA_RESPAWN_H[boss.type] * 60 * 60 * 1000;
-    const respawnTime = killTime + respawnMs;
+    const respawnTime = killTime + SA_RESPAWN_H[boss.type] * 60 * 60 * 1000;
     clearSABossCards(id);
     data.kills[id] = { killTime, respawnTime, lastKiller: interaction.user.username };
     save();
@@ -2243,8 +1947,7 @@ client.on(Events.InteractionCreate, async interaction => {
       .addOptions(SA_SERVERS.map(s => ({ label: `Server ${s}`, value: String(s) })));
     return interaction.reply({
       content: `⚔️ **[World Boss] ${label}** — Select the server where the kill happened:`,
-      components: [new ActionRowBuilder().addComponents(menu)],
-      flags: MessageFlags.Ephemeral
+      components: [new ActionRowBuilder().addComponents(menu)], flags: MessageFlags.Ephemeral
     });
   }
 
@@ -2257,57 +1960,39 @@ client.on(Events.InteractionCreate, async interaction => {
       const boss = pickNextWBInstance(key, server);
       if (boss) {
         log(interaction.user, `WB: Auto-picked ${boss.name} for kill`);
-        const modal = new ModalBuilder()
-          .setCustomId(`wb_killtime_${boss.id}`)
-          .setTitle(`Kill Time — ${boss.name}`);
-        modal.addComponents(new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId("time")
-            .setLabel("HH:MM (24h, server time) or 'now'")
-            .setStyle(TextInputStyle.Short)
-            .setPlaceholder("e.g. 21:34 or now")
-        ));
+        const modal = new ModalBuilder().setCustomId(`wb_killtime_${boss.id}`).setTitle(`Kill Time — ${boss.name}`);
+        modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
         return interaction.showModal(modal);
-      } else {
-        const instances = getWBInstances(key, server);
-        const now = Date.now();
-        const cfg = WORLD_BOSS_CONFIG[key];
-        const menu = new StringSelectMenuBuilder()
-          .setCustomId(`wb_pick_instance_${key}_s${server}`)
-          .setPlaceholder("All slots busy — pick which to update")
-          .addOptions(instances.map(b => {
-            const e = data.kills[b.id];
-            let status = "🟢 READY";
-            if (e) {
-              const cd        = e.respawnTime - now;
-              const windowLeft = e.respawnTime + cfg.windowMs - now;
-              if (cd > 0) status = `🔴 ${format(cd)}`;
-              else if (windowLeft > 0) status = `🟢 WIN ${format(windowLeft)}`;
-              else status = `⚠️ MISSED`;
-            }
-            return { label: `#${b.index} — ${status}`, value: b.id };
-          }));
-        return interaction.reply({
-          content: `⚠️ **[World Boss] ${WORLD_BOSSES.find(b => b.key === key).label} S${server}** — All slots are active. Pick which instance to update:`,
-          components: [new ActionRowBuilder().addComponents(menu)],
-          flags: MessageFlags.Ephemeral
-        });
       }
+      const instances = getWBInstances(key, server);
+      const now = Date.now();
+      const cfg = WORLD_BOSS_CONFIG[key];
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId(`wb_pick_instance_${key}_s${server}`)
+        .setPlaceholder("All slots busy — pick which to update")
+        .addOptions(instances.map(b => {
+          const e = data.kills[b.id];
+          let status = "🟢 READY";
+          if (e) {
+            const cd         = e.respawnTime - now;
+            const windowLeft = e.respawnTime + cfg.windowMs - now;
+            if (cd > 0) status = `⏳ ${format(cd)}`;
+            else if (windowLeft > 0) status = `🟢 WIN ${format(windowLeft)}`;
+            else status = `⚠️ MISSED`;
+          }
+          return { label: `#${b.index} — ${status}`, value: b.id };
+        }));
+      return interaction.reply({
+        content: `⚠️ **[World Boss] ${WORLD_BOSSES.find(b => b.key === key).label} S${server}** — All slots are active. Pick which instance to update:`,
+        components: [new ActionRowBuilder().addComponents(menu)], flags: MessageFlags.Ephemeral
+      });
     }
 
     const id   = `wb_${key}_s${server}`;
     const boss = WORLD_BOSSES.find(b => b.id === id);
     log(interaction.user, `WB: Selected server ${server} for ${boss.name}`);
-    const modal = new ModalBuilder()
-      .setCustomId(`wb_killtime_${id}`)
-      .setTitle(`Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder()
-        .setCustomId("time")
-        .setLabel("HH:MM (24h, server time) or 'now'")
-        .setStyle(TextInputStyle.Short)
-        .setPlaceholder("e.g. 21:34 or now")
-    ));
+    const modal = new ModalBuilder().setCustomId(`wb_killtime_${id}`).setTitle(`Kill Time — ${boss.name}`);
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2316,12 +2001,8 @@ client.on(Events.InteractionCreate, async interaction => {
     const id   = interaction.values[0];
     const boss = WORLD_BOSSES.find(b => b.id === id);
     log(interaction.user, `WB: Manually picked instance ${boss.name}`);
-    const modal = new ModalBuilder()
-      .setCustomId(`wb_killtime_${id}`)
-      .setTitle(`Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-    ));
+    const modal = new ModalBuilder().setCustomId(`wb_killtime_${id}`).setTitle(`Kill Time — ${boss.name}`);
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2330,7 +2011,7 @@ client.on(Events.InteractionCreate, async interaction => {
     snapshot();
     const id   = interaction.customId.replace("wb_killtime_", "");
     const boss = WORLD_BOSSES.find(b => b.id === id);
-    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase();
+    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase() || "now";
     const now  = Date.now();
     let killTime;
     if (raw === "now") { killTime = now; }
@@ -2373,9 +2054,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const boss = WORLD_BOSSES.find(b => b.id === id);
     log(interaction.user, `WB: Opened set-time modal for ${boss.name} (window)`);
     const modal = new ModalBuilder().setCustomId(`wb_window_killtime_${id}`).setTitle(`Set Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-    ));
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2384,7 +2063,7 @@ client.on(Events.InteractionCreate, async interaction => {
     snapshot();
     const id   = interaction.customId.replace("wb_window_killtime_", "");
     const boss = WORLD_BOSSES.find(b => b.id === id);
-    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase();
+    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase() || "now";
     const now  = Date.now();
     let killTime;
     if (raw === "now") { killTime = now; }
@@ -2427,9 +2106,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const boss = WORLD_BOSSES.find(b => b.id === id);
     log(interaction.user, `WB: Opened set-time modal for ${boss.name} (missed window)`);
     const modal = new ModalBuilder().setCustomId(`wb_missed_killtime_${id}`).setTitle(`Set Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-    ));
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2438,7 +2115,7 @@ client.on(Events.InteractionCreate, async interaction => {
     snapshot();
     const id   = interaction.customId.replace("wb_missed_killtime_", "");
     const boss = WORLD_BOSSES.find(b => b.id === id);
-    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase();
+    const raw  = interaction.fields.getTextInputValue("time").trim().toLowerCase() || "now";
     const now  = Date.now();
     let killTime;
     if (raw === "now") { killTime = now; }
@@ -2462,23 +2139,13 @@ client.on(Events.InteractionCreate, async interaction => {
     const saKeys = [...new Set(SHADOW_BOSSES.map(b => b.key))];
     const wbKeys = [...new Set(WORLD_BOSSES.map(b => b.key))];
     const allOptions = [
-      ...saKeys.map(k => {
-        const b = SHADOW_BOSSES.find(x => x.key === k);
-        return { label: `[SA] ${b.label}`, value: `sa_${k}` };
-      }),
-      ...wbKeys.map(k => {
-        const b = WORLD_BOSSES.find(x => x.key === k);
-        return { label: `[WB] ${b.label}`, value: `wb_${k}` };
-      }),
+      ...saKeys.map(k => { const b = SHADOW_BOSSES.find(x => x.key === k); return { label: `[SA] ${b.label}`, value: `sa_${k}` }; }),
+      ...wbKeys.map(k => { const b = WORLD_BOSSES.find(x => x.key === k);  return { label: `[WB] ${b.label}`, value: `wb_${k}` }; }),
     ];
-    const menu = new StringSelectMenuBuilder()
-      .setCustomId("sa_insert_type_select")
-      .setPlaceholder("Select mob type")
-      .addOptions(allOptions);
+    const menu = new StringSelectMenuBuilder().setCustomId("sa_insert_type_select").setPlaceholder("Select mob type").addOptions(allOptions);
     return interaction.reply({
       content: "📝 **Insert Kill Time** — Select mob type:",
-      components: [new ActionRowBuilder().addComponents(menu)],
-      flags: MessageFlags.Ephemeral
+      components: [new ActionRowBuilder().addComponents(menu)], flags: MessageFlags.Ephemeral
     });
   }
 
@@ -2487,37 +2154,23 @@ client.on(Events.InteractionCreate, async interaction => {
     const value   = interaction.values[0];
     const isWorld = value.startsWith("wb_");
     const key     = value.replace(/^(sa_|wb_)/, "");
-
     if (isWorld) {
       const label = WORLD_BOSSES.find(b => b.key === key)?.label ?? key;
-      const menu  = new StringSelectMenuBuilder()
-        .setCustomId(`wb_insert_server_select_${key}`)
-        .setPlaceholder("Select server")
+      const menu  = new StringSelectMenuBuilder().setCustomId(`wb_insert_server_select_${key}`).setPlaceholder("Select server")
         .addOptions(SA_SERVERS.map(s => ({ label: `Server ${s}`, value: String(s) })));
-      return interaction.reply({
-        content: `📝 **[WB] ${label}** — Select server:`,
-        components: [new ActionRowBuilder().addComponents(menu)],
-        flags: MessageFlags.Ephemeral
-      });
-    } else {
-      const label = SHADOW_BOSSES.find(b => b.key === key)?.label ?? key;
-      const menu  = new StringSelectMenuBuilder()
-        .setCustomId(`sa_insert_server_select_${key}`)
-        .setPlaceholder("Select server")
-        .addOptions(SA_SERVERS.map(s => ({ label: `Server ${s}`, value: String(s) })));
-      return interaction.reply({
-        content: `📝 **[SA] ${label}** — Select server:`,
-        components: [new ActionRowBuilder().addComponents(menu)],
-        flags: MessageFlags.Ephemeral
-      });
+      return interaction.reply({ content: `📝 **[WB] ${label}** — Select server:`, components: [new ActionRowBuilder().addComponents(menu)], flags: MessageFlags.Ephemeral });
     }
+    const label = SHADOW_BOSSES.find(b => b.key === key)?.label ?? key;
+    const menu  = new StringSelectMenuBuilder().setCustomId(`sa_insert_server_select_${key}`).setPlaceholder("Select server")
+      .addOptions(SA_SERVERS.map(s => ({ label: `Server ${s}`, value: String(s) })));
+    return interaction.reply({ content: `📝 **[SA] ${label}** — Select server:`, components: [new ActionRowBuilder().addComponents(menu)], flags: MessageFlags.Ephemeral });
   }
 
   // ── SA: INSERT TIME — server picker ──
   if (interaction.isStringSelectMenu() && interaction.customId.startsWith("sa_insert_server_select_")) {
-    const key    = interaction.customId.replace("sa_insert_server_select_", "");
-    const server = parseInt(interaction.values[0], 10);
-    const isGoblinType   = SHADOW_BOSSES.find(b => b.key === key)?.type === "goblin";
+    const key          = interaction.customId.replace("sa_insert_server_select_", "");
+    const server       = parseInt(interaction.values[0], 10);
+    const isGoblinType = SHADOW_BOSSES.find(b => b.key === key)?.type === "goblin";
     const isMultiSAFixed = isMultiInstanceSAFixed(key);
 
     if (isGoblinType) {
@@ -2532,7 +2185,7 @@ client.on(Events.InteractionCreate, async interaction => {
           if (e) {
             const cooldown  = e.respawnTime - now;
             const windowEnd = e.respawnTime + SA_GOBLIN_WINDOW_MS;
-            if (cooldown > 0) statusStr = `🔴 ${format(cooldown)}`;
+            if (cooldown > 0) statusStr = `⏳ ${format(cooldown)}`;
             else if (windowEnd > now) statusStr = `🟢 WINDOW ${format(windowEnd - now)}`;
             else statusStr = `⚠️ MISSED`;
           }
@@ -2540,8 +2193,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }));
       return interaction.reply({
         content: `📝 **${SHADOW_BOSSES.find(b => b.key === key).label} S${server}** — Pick which goblin to update:`,
-        components: [new ActionRowBuilder().addComponents(menu)],
-        flags: MessageFlags.Ephemeral
+        components: [new ActionRowBuilder().addComponents(menu)], flags: MessageFlags.Ephemeral
       });
     }
 
@@ -2554,16 +2206,12 @@ client.on(Events.InteractionCreate, async interaction => {
         .addOptions(instances.map(b => {
           const e = data.kills[b.id];
           let status = "🟢 READY";
-          if (e) {
-            const cd = e.respawnTime - now;
-            status = cd > 0 ? `🔴 ${format(cd)}` : `🟡 SPAWNED`;
-          }
+          if (e) { const cd = e.respawnTime - now; status = cd > 0 ? `⏳ ${format(cd)}` : `🟡 SPAWNED`; }
           return { label: `#${b.index} — ${status}`, value: b.id };
         }));
       return interaction.reply({
         content: `📝 **${SHADOW_BOSSES.find(b => b.key === key).label} S${server}** — Pick which instance to update:`,
-        components: [new ActionRowBuilder().addComponents(menu)],
-        flags: MessageFlags.Ephemeral
+        components: [new ActionRowBuilder().addComponents(menu)], flags: MessageFlags.Ephemeral
       });
     }
 
@@ -2571,9 +2219,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const boss = SHADOW_BOSSES.find(b => b.id === id);
     log(interaction.user, `SA Insert: selected ${boss.name}`);
     const modal = new ModalBuilder().setCustomId(`sa_killtime_${id}`).setTitle(`Insert Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-    ));
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2583,9 +2229,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const boss = SHADOW_BOSSES.find(b => b.id === id);
     log(interaction.user, `SA Insert: selected fixed instance ${boss.name}`);
     const modal = new ModalBuilder().setCustomId(`sa_killtime_${id}`).setTitle(`Insert Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-    ));
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2595,9 +2239,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const boss = SHADOW_BOSSES.find(b => b.id === id);
     log(interaction.user, `SA Insert: selected goblin ${boss.name}`);
     const modal = new ModalBuilder().setCustomId(`sa_killtime_${id}`).setTitle(`Insert Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-    ));
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2617,9 +2259,9 @@ client.on(Events.InteractionCreate, async interaction => {
           const e = data.kills[b.id];
           let status = "🟢 READY";
           if (e) {
-            const cd        = e.respawnTime - now;
+            const cd         = e.respawnTime - now;
             const windowLeft = e.respawnTime + cfg.windowMs - now;
-            if (cd > 0) status = `🔴 ${format(cd)}`;
+            if (cd > 0) status = `⏳ ${format(cd)}`;
             else if (windowLeft > 0) status = `🟢 WIN ${format(windowLeft)}`;
             else status = `⚠️ MISSED`;
           }
@@ -2627,8 +2269,7 @@ client.on(Events.InteractionCreate, async interaction => {
         }));
       return interaction.reply({
         content: `📝 **[WB] ${WORLD_BOSSES.find(b => b.key === key).label} S${server}** — Pick which instance to update:`,
-        components: [new ActionRowBuilder().addComponents(menu)],
-        flags: MessageFlags.Ephemeral
+        components: [new ActionRowBuilder().addComponents(menu)], flags: MessageFlags.Ephemeral
       });
     }
 
@@ -2636,9 +2277,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const boss = WORLD_BOSSES.find(b => b.id === id);
     log(interaction.user, `WB Insert: selected ${boss.name}`);
     const modal = new ModalBuilder().setCustomId(`wb_killtime_${id}`).setTitle(`Insert Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-    ));
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2648,9 +2287,7 @@ client.on(Events.InteractionCreate, async interaction => {
     const boss = WORLD_BOSSES.find(b => b.id === id);
     log(interaction.user, `WB Insert: selected instance ${boss.name}`);
     const modal = new ModalBuilder().setCustomId(`wb_killtime_${id}`).setTitle(`Insert Kill Time — ${boss.name}`);
-    modal.addComponents(new ActionRowBuilder().addComponents(
-      new TextInputBuilder().setCustomId("time").setLabel("HH:MM (24h, server time) or 'now'").setStyle(TextInputStyle.Short).setPlaceholder("e.g. 21:34 or now")
-    ));
+    modal.addComponents(new ActionRowBuilder().addComponents(buildTimeInput()));
     return interaction.showModal(modal);
   }
 
@@ -2661,25 +2298,24 @@ client.on(Events.InteractionCreate, async interaction => {
       .setCustomId("sa_reset_category")
       .setPlaceholder("Select category to reset")
       .addOptions([
-        { label: "👺 Blue Goblin",        value: "sa_blue_goblin"   },
-        { label: "👺 Red Goblin",         value: "sa_red_goblin"    },
-        { label: "👺 Yellow Goblin",      value: "sa_yellow_goblin" },
-        { label: "👹 Red Dragon",         value: "sa_red_dragon"    },
-        { label: "👹 Cursed Santa",       value: "sa_cursed_santa"  },
-        { label: "👹 Kharzul",            value: "sa_kharzul"       },
-        { label: "👹 Vescrya",            value: "sa_vescrya"       },
-        { label: "👹 Muggron",            value: "sa_muggron"       },
-        { label: "👹 White Wizard",       value: "sa_white_wizard"  },
-        { label: "👹 Death King",         value: "sa_death_king"    },
-        { label: "🌍 Borgar",             value: "wb_borgar"        },
-        { label: "🌍 Dreadhorn",          value: "wb_dreadhorn"     },
-        { label: "🌍 Moltragon",          value: "wb_moltragon"     },
-        { label: "☠️ DELETE ALL TIMERS",  value: "DELETE_ALL"       },
+        { label: "👺 Blue Goblin",       value: "sa_blue_goblin"   },
+        { label: "👺 Red Goblin",        value: "sa_red_goblin"    },
+        { label: "👺 Yellow Goblin",     value: "sa_yellow_goblin" },
+        { label: "👹 Red Dragon",        value: "sa_red_dragon"    },
+        { label: "👹 Cursed Santa",      value: "sa_cursed_santa"  },
+        { label: "👹 Kharzul",           value: "sa_kharzul"       },
+        { label: "👹 Vescrya",           value: "sa_vescrya"       },
+        { label: "👹 Muggron",           value: "sa_muggron"       },
+        { label: "👹 White Wizard",      value: "sa_white_wizard"  },
+        { label: "👹 Death King",        value: "sa_death_king"    },
+        { label: "🌍 Borgar",            value: "wb_borgar"        },
+        { label: "🌍 Dreadhorn",         value: "wb_dreadhorn"     },
+        { label: "🌍 Moltragon",         value: "wb_moltragon"     },
+        { label: "☠️ DELETE ALL TIMERS", value: "DELETE_ALL"       },
       ]);
     return interaction.reply({
       content: "🧹 **Reset** — Select category to reset:",
-      components: [new ActionRowBuilder().addComponents(categoryMenu)],
-      flags: MessageFlags.Ephemeral
+      components: [new ActionRowBuilder().addComponents(categoryMenu)], flags: MessageFlags.Ephemeral
     });
   }
 
@@ -2689,16 +2325,8 @@ client.on(Events.InteractionCreate, async interaction => {
     const value = interaction.values[0];
 
     if (value === "DELETE_ALL") {
-      for (const b of SHADOW_BOSSES) {
-        clearSABossCards(b.id);
-        delete data.kills[b.id];
-        spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
-      }
-      for (const b of WORLD_BOSSES) {
-        clearWBBossCards(b.id);
-        delete data.kills[b.id];
-        spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
-      }
+      for (const b of SHADOW_BOSSES) { clearSABossCards(b.id); delete data.kills[b.id]; spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false }; }
+      for (const b of WORLD_BOSSES)  { clearWBBossCards(b.id); delete data.kills[b.id]; spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false }; }
       save();
       log(interaction.user, `RESET ALL TIMERS`);
       await announceAdmin(interaction.channel, interaction.user, "reset **ALL** timers ☠️");
@@ -2715,30 +2343,19 @@ client.on(Events.InteractionCreate, async interaction => {
         ...bossesInCategory.map(b => ({ label: `Reset ${b.name}`, value: b.id })),
         { label: `Reset ALL ${bossesInCategory[0].label}`, value: `RESET_WB_KEY_${key}` },
       ];
-      const specificMenu = new StringSelectMenuBuilder()
-        .setCustomId("sa_reset_select")
-        .setPlaceholder("Select specific boss to reset")
-        .addOptions(options);
-      return interaction.reply({
-        content: `🧹 **[WB] ${bossesInCategory[0].label}** — Select which to reset:`,
-        components: [new ActionRowBuilder().addComponents(specificMenu)],
-        flags: MessageFlags.Ephemeral
-      });
-    } else {
-      const bossesInCategory = SHADOW_BOSSES.filter(b => b.key === key);
-      const specificMenu = new StringSelectMenuBuilder()
-        .setCustomId("sa_reset_select")
-        .setPlaceholder("Select specific boss to reset")
-        .addOptions([
-          ...bossesInCategory.map(b => ({ label: `Reset ${b.name}`, value: b.id })),
-          { label: `Reset ALL ${bossesInCategory[0].label}`, value: `RESET_SA_KEY_${key}` },
-        ]);
-      return interaction.reply({
-        content: `🧹 **[SA] ${bossesInCategory[0].label}** — Select which to reset:`,
-        components: [new ActionRowBuilder().addComponents(specificMenu)],
-        flags: MessageFlags.Ephemeral
-      });
+      const specificMenu = new StringSelectMenuBuilder().setCustomId("sa_reset_select").setPlaceholder("Select specific boss to reset").addOptions(options);
+      return interaction.reply({ content: `🧹 **[WB] ${bossesInCategory[0].label}** — Select which to reset:`, components: [new ActionRowBuilder().addComponents(specificMenu)], flags: MessageFlags.Ephemeral });
     }
+
+    const bossesInCategory = SHADOW_BOSSES.filter(b => b.key === key);
+    const specificMenu = new StringSelectMenuBuilder()
+      .setCustomId("sa_reset_select")
+      .setPlaceholder("Select specific boss to reset")
+      .addOptions([
+        ...bossesInCategory.map(b => ({ label: `Reset ${b.name}`, value: b.id })),
+        { label: `Reset ALL ${bossesInCategory[0].label}`, value: `RESET_SA_KEY_${key}` },
+      ]);
+    return interaction.reply({ content: `🧹 **[SA] ${bossesInCategory[0].label}** — Select which to reset:`, components: [new ActionRowBuilder().addComponents(specificMenu)], flags: MessageFlags.Ephemeral });
   }
 
   // ── RESET — apply specific ──
@@ -2749,11 +2366,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (value.startsWith("RESET_SA_KEY_")) {
       const key     = value.replace("RESET_SA_KEY_", "");
       const targets = SHADOW_BOSSES.filter(b => b.key === key);
-      for (const b of targets) {
-        clearSABossCards(b.id);
-        delete data.kills[b.id];
-        spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
-      }
+      for (const b of targets) { clearSABossCards(b.id); delete data.kills[b.id]; spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false }; }
       save();
       const label = targets[0]?.label ?? key;
       log(interaction.user, `SA RESET ALL ${label}`);
@@ -2765,11 +2378,7 @@ client.on(Events.InteractionCreate, async interaction => {
     if (value.startsWith("RESET_WB_KEY_")) {
       const key     = value.replace("RESET_WB_KEY_", "");
       const targets = WORLD_BOSSES.filter(b => b.key === key);
-      for (const b of targets) {
-        clearWBBossCards(b.id);
-        delete data.kills[b.id];
-        spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
-      }
+      for (const b of targets) { clearWBBossCards(b.id); delete data.kills[b.id]; spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false }; }
       save();
       const label = targets[0]?.label ?? key;
       log(interaction.user, `WB RESET ALL ${label}`);
@@ -2780,17 +2389,13 @@ client.on(Events.InteractionCreate, async interaction => {
 
     if (value.startsWith("wb_")) {
       const boss = WORLD_BOSSES.find(b => b.id === value);
-      clearWBBossCards(value);
-      delete data.kills[value];
-      spawnWarnings[value] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
+      clearWBBossCards(value); delete data.kills[value]; spawnWarnings[value] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
       save();
       log(interaction.user, `WB RESET timer for ${boss.name}`);
       await announceAdmin(interaction.channel, interaction.user, `reset timer for **[World Boss] ${boss.name}**`);
     } else {
       const boss = SHADOW_BOSSES.find(b => b.id === value);
-      clearSABossCards(value);
-      delete data.kills[value];
-      spawnWarnings[value] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
+      clearSABossCards(value); delete data.kills[value]; spawnWarnings[value] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
       save();
       log(interaction.user, `SA RESET timer for ${boss.name}`);
       await announceAdmin(interaction.channel, interaction.user, `reset timer for **[Shadow Abyss] ${boss.name}**`);
@@ -2798,14 +2403,6 @@ client.on(Events.InteractionCreate, async interaction => {
     await maybeRepinAfterAction(interaction.channel);
     return interaction.deferUpdate();
   }
-
-// ── SHOW FULL DASHBOARD — ephemeral, only visible to the clicking user ──
-if (interaction.isButton() && interaction.customId === "toggle_full_dashboard") {
-  return interaction.reply({
-    embeds: [buildShadowEmbed(true)],
-    flags: MessageFlags.Ephemeral
-  });
-}
 
   // ── SA: UNDO ──
   if (interaction.isButton() && interaction.customId === "sa_undo") {
