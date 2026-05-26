@@ -96,6 +96,7 @@ const SA_RESPAWN_H = {
 const SA_GOBLIN_WINDOW_MS    = 1 * 60 * 60 * 1000;
 const SA_MAX_AUTO_ADVANCE    = 3;
 const SA_FIXED_MISSED_WINDOW_MS = 2 * 60 * 60 * 1000;
+const SA_FIXED_WINDOW_MS        = 60 * 60 * 1000;
 
 function buildShadowBosses() {
   const list = [];
@@ -632,7 +633,7 @@ function recalcSpawnWarningsAfterUndo() {
     }
     const isGoblin      = b.type === "goblin";
     const cooldown      = e.respawnTime - now;
-    const windowEnd     = isGoblin ? e.respawnTime + SA_GOBLIN_WINDOW_MS : e.respawnTime + 5 * 60 * 1000;
+    const windowEnd     = isGoblin ? e.respawnTime + SA_GOBLIN_WINDOW_MS : e.respawnTime + SA_FIXED_MISSED_WINDOW_MS;
     const windowExpired = now > windowEnd;
     spawnWarnings[b.id] = {
       warned5:       cooldown <= 5 * 60 * 1000,
@@ -1548,48 +1549,63 @@ function checkSAWarnings(channel) {
   for (const b of SHADOW_BOSSES) {
     const e = data.kills[b.id];
     if (!e) continue;
-    const isGoblin               = b.type === "goblin";
-    const cooldown               = e.respawnTime - now;
-    const windowEnd              = isGoblin ? e.respawnTime + SA_GOBLIN_WINDOW_MS : e.respawnTime + 5 * 60 * 1000;
+    const isGoblin   = b.type === "goblin";
+    const isFixed    = b.type === "sa_fixed6" || b.type === "sa_fixed7" || b.type === "sa_fixed12";
+    const cooldown   = e.respawnTime - now;
+
+    const windowEnd      = isGoblin ? e.respawnTime + SA_GOBLIN_WINDOW_MS
+                         : isFixed  ? e.respawnTime + SA_FIXED_WINDOW_MS
+                         : e.respawnTime + SA_FIXED_WINDOW_MS;
+    const missedDeadline = isGoblin ? e.respawnTime + SA_GOBLIN_WINDOW_MS
+                         : e.respawnTime + SA_FIXED_MISSED_WINDOW_MS;
+
     const windowLeft             = windowEnd - now;
-    const timeSinceWindowExpired = now - windowEnd;
+    const timeSinceWindowExpired = now - missedDeadline;
     const advCount               = missedCount[b.id] || 0;
+
     if (!spawnWarnings[b.id])
       spawnWarnings[b.id] = { warned5: false, warned20: false, windowCreated: false, missedHandled: false };
     const w = spawnWarnings[b.id];
+
+    // 5-minute pre-spawn warning
     if (cooldown > 0 && cooldown <= 5 * 60 * 1000 && !w.warned5) {
       w.warned5 = true;
       if (!missedWindowMessages[b.id])
         postEveryoneWarning(channel, `${b.id}_5min`, `@everyone ⏳ **[Shadow Abyss] ${b.name}** spawns in 5 minutes`, Math.max(cooldown, 0));
     }
+
+    // Goblin: open spawn window
     if (isGoblin && cooldown <= 0 && windowLeft > 0 && !w.windowCreated) {
       w.windowCreated = true;
       clearEveryoneWarning(`${b.id}_5min`);
       if (!missedWindowMessages[b.id]) createSASpawnWindow(b, b.id, channel, windowEnd);
     }
+
+    // Goblin: 20-minute closing warning
     if (isGoblin && cooldown <= 0 && windowLeft > 0 && windowLeft <= 20 * 60 * 1000 && !w.warned20) {
       w.warned20 = true;
       postEveryoneWarning(channel, `${b.id}_20min`, `@everyone ⚠️ **[Shadow Abyss] ${b.name}** goblin window closes in 20 minutes!`);
     }
-    if (!isGoblin && cooldown <= 0 && cooldown >= -5 * 60 * 1000 && !w.windowCreated) {
+
+    // Fixed bosses (Vescrya, Kharzul, etc): open spawn window
+    if (isFixed && cooldown <= 0 && windowLeft > 0 && !w.windowCreated) {
       w.windowCreated = true;
       clearEveryoneWarning(`${b.id}_5min`);
-
       if (!missedWindowMessages[b.id]) createSASpawnWindow(b, b.id, channel, windowEnd);
-
       const tsRespawn = Math.floor(e.respawnTime / 1000);
       postEveryoneWarning(channel, `${b.id}_spawned`,
         `@everyone 🌑 **[Shadow Abyss] ${b.name}** has spawned! Log the kill when done.\n<t:${tsRespawn}:t>`,
-        10 * 60 * 1000);
+        Math.min(10 * 60 * 1000, windowLeft));
     }
+
+    // Missed window handler
     if (timeSinceWindowExpired >= 10 * 60 * 1000 && !w.missedHandled) {
       w.missedHandled = true;
       if (isGoblin && advCount < SA_MAX_AUTO_ADVANCE) handleSAMissedWindowGoblin(b, b.id, channel);
-      else if (!isGoblin) handleSAMissedWindowFixed(b, b.id, channel);
+      else if (isFixed) handleSAMissedWindowFixed(b, b.id, channel);
     }
   }
 }
-
 // =====================
 // WARNING SYSTEM — World Bosses
 // =====================
