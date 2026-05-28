@@ -88,6 +88,7 @@ const SA_SERVERS = [1, 2, 3];
 
 const SA_RESPAWN_H = {
   goblin:     10,
+  sa_fixed3:   3,
   sa_fixed6:   6,
   sa_fixed7:   7,
   sa_fixed12: 12,
@@ -102,7 +103,7 @@ const SA_BOSS_DEFS = [
   { key: "cursed_santa",  label: "Cursed Santa",   type: "sa_fixed6"  },
   { key: "kharzul",       label: "Kharzul",        type: "sa_fixed7"  },
   { key: "vescrya",       label: "Vescrya",        type: "sa_fixed7"  },
-  { key: "muggron",       label: "Muggron",        type: "sa_fixed7"  },
+  { key: "muggron",       label: "Muggron",        type: "sa_fixed3"  },
   { key: "white_wizard",  label: "White Wizard",   type: "sa_fixed12" },
   { key: "death_king",    label: "Death King",     type: "sa_fixed12" },
 ];
